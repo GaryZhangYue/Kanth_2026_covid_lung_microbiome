@@ -1,0 +1,901 @@
+---
+title: "multi-modal data integration"
+subtitle: "sPLS-based analysis"
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+.libPaths('/Users/zhangy68/R/R_4.4.2')
+## initiate ---------------------------------------------------------
+packages_to_load = c('ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel','purrr','dplyr','dendextend','lmerTest','Maaslin2',
+                     'performance','mixOmics','ComplexHeatmap','circlize')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions and image,eval=TRUE}
+indir = "../../data/R_input"
+outdir = "../../data/Formal_analysis_files2"
+load(file.path(outdir,'3.c.Diversity.clinical_effects.rdata'))
+# overwrite dir path after loading rdata
+indir = "../../data/R_input" # overwrite dir path after loading rdata
+outdir = "../../data/Formal_analysis_files2" # overwrite dir path after loading rdata
+
+source('../utils_functions.R')
+set.seed(666)
+```
+
+```{r mixomics specific functions}
+
+# remove low abundance OTU for mixOmics analysis
+low.count.removal <- function(
+    data, # OTU count data frame of size n (sample) x p (OTU)
+    percent=0.01 # cutoff chosen
+) 
+{
+  keep.otu = which(colSums(data)*100/(sum(colSums(data))) > percent)
+  data.filter = data[,keep.otu]
+  return(list(data.filter = data.filter, keep.otu = keep.otu))
+}
+
+mixomics.CLR = function(dataset,removeLowOtu = T, lowOtuCutOff=0.01){
+  if(removeLowOtu){
+    # call the function then apply on the offset data
+    result.filter <- low.count.removal(dataset, percent=lowOtuCutOff)
+    dataset <- as.matrix(result.filter$data.filter)
+  }
+  # undergo CLR transformation
+  ## apply offset
+  dataset <- dataset + 0.01
+  data.clr = decostand(dataset,MARGIN = 1, method = 'clr') %>% as.data.frame
+  return(data.clr)
+}
+
+mixOmics.PCA = function(df,group,ncomp=10,scale=F,title){
+  # # test variables
+  # df <- data.clr
+  # group <- predictor
+  # ncomp = 10
+  # scale = F
+  # title = 'test'
+  
+  # tuning PCA model in terms of how many components to include
+  tune.pca.multi <- tune.pca(df, ncomp = 10, scale = scale)
+  plot.tune = plot(tune.pca.multi)
+  
+  final.pca.multi <- pca(df, ncomp = ncomp,scale = scale)
+  
+  plot.pca = plotIndiv(final.pca.multi,
+            comp = c(1, 2),   # Specify components to plot
+            ind.names = TRUE, # Show row names of samples
+            group = group,
+            title = title,
+            legend = TRUE, legend.title = '')
+  plot.var = plotVar(final.pca.multi, comp = c(1, 2),
+                     var.names = TRUE,
+                     cex = 3,         # To change the font size
+                     # cutoff = 0.5,  # For further cutoff
+                     title = title)
+  plot.bi = biplot(final.pca.multi, group =group, 
+                   legend.title = ' ')
+  return(list(plot.tune,plot.pca,plot.var,plot.bi))
+}
+
+mixOmics.PLSDA = function(df,group,ncomp=10,title,scale = F){
+  # # test variables
+  # df <- data.clr
+  # group = predictor
+  # ncomp = 10
+  # title = 'test'
+  # scale = F
+  
+  plsda <- plsda(df,group, ncomp = 10,scale = scale)
+  perf.plsda <- perf(plsda, validation = 'Mfold', folds = 3, 
+                     progressBar = FALSE,  # Set to TRUE to track progress
+                     nrepeat = 10)         # We suggest nrepeat = 50
+  
+  plot.error = plot(perf.plsda, sd = TRUE, legend.position = 'horizontal')
+  plsda <- plsda(df,group, ncomp = ncomp,scale = scale)
+  plot.plsda.1_2 = plotIndiv(plsda, ind.names = FALSE, legend=TRUE,
+                             comp=c(1,2), ellipse = TRUE, 
+                             title = paste0(title,': comp 1-2'),
+                             X.label = 'PLS-DA comp 1', Y.label = 'PLS-DA comp 2')
+  
+  plot.plsda.2_3 = plotIndiv(plsda, ind.names = FALSE, legend=TRUE,
+                             comp=c(2,3), ellipse = TRUE, 
+                             title =  paste0(title,': comp 2-3'),
+                             X.label = 'PLS-DA comp 2', Y.label = 'PLS-DA comp 3')
+  
+  return(list(plot.error,plot.plsda.1_2,plot.plsda.2_3,plsda))
+}
+
+plot_unifrac_longXaxis = function(dm,metatable,grp,dm_name,permtest = F,grp_continuous = F,custom_colors){
+  # dummy input variable for testing function
+  # dm = distmtx
+  # metatable = metadata.o
+  # dm_name = 'x'
+  # grp = grouping
+  
+  
+  metatable = subset(metatable, get(grp) != 'N.A.', select = c(grp))
+  # select distance matrix matching to metadata
+  dm = dist_subset(dm,rownames(metatable))
+  # some distance measures may result in negative eigenvalues. In that case, add a correction:
+  pcoa.wunifrac = pcoa(dm,correction = 'cailliez')
+  # transform the pcoa.wunifrac object into a df for making it plottable with ggplot2
+  coordinates.pcoa.wunifrac = data.frame(pcoa.wunifrac$vectors,check.names = FALSE)
+  
+  # Adonis test (only run if all groups have >= 5 samples)
+  ## Calculate the number of samples in each group
+  group_counts <- table(metatable[[grp]])
+  ## Check if any group has fewer than 5 samples
+  any_small_groups <- any(group_counts < 5)
+  if (any_small_groups == F & permtest ==T){
+    stopifnot(all(rownames(metatable) == names(dm)))
+    adonis.r = adonis2(dm~get(grp),metatable,permut = 1000,parallel = 1)
+    adonis.p = round(adonis.r$`Pr(>F)`[1],digit = 4)
+    
+    betadisp.r = permutest(betadisper(dm,metatable[[grp]]),permutations = 1000,parallel = 1)
+    betadisp.p = round(betadisp.r$tab[[6]][1],digit = 4)
+    
+    subtitle = paste0('permanova p val = ', adonis.p, ',betadisp p val = ', betadisp.p)
+  } else {
+    subtitle = 'Adonis/permdisp skipped'
+  }
+  
+  
+  # plot
+  if (!all(rownames(metatable) == rownames(coordinates.pcoa.wunifrac))) {stop("mismatchs in pca coordinates and coloring column")} # sanity check
+  
+  # Calculate group centroids
+  coordinates = coordinates.pcoa.wunifrac[,c(1,2)]
+  #coordinates[[grp]]= metatable[[grp]]      
+  coordinates[[grp]] = metatable[[grp]][match(rownames(coordinates),rownames(metatable))] 
+  #print(coordinates)
+  centroids <- coordinates %>%
+    group_by_at(grp) %>%
+    summarize(CentroidX = mean(Axis.1), CentroidY = mean(Axis.2))
+  coordinates = merge(coordinates,centroids,
+                      by = grp)           
+  # automatically grab relative eigenvalue
+  if ("Rel_corr_eig" %in% colnames(pcoa.wunifrac$values)) {
+    pc_exp <- pcoa.wunifrac$values$Rel_corr_eig
+  } else {
+    pc_exp <- pcoa.wunifrac$values$Relative_eig
+  }
+  
+  if (grp_continuous == F){
+    
+  pcoa <- ggplot() +
+  # Smaller scatter points
+  geom_point(data = coordinates,
+             mapping = aes(x = `Axis.1`, y = `Axis.2`, colour = get(grp)),
+             alpha = 0.6, size = 0.5) + 
+  
+  # Connection lines to centroids
+  geom_segment(data = coordinates,
+               aes(x = CentroidX, xend = Axis.1, y = CentroidY, yend = Axis.2, color = get(grp)),
+               alpha = 0.3, size = 0.3) +
+  # Add ellipses
+  #stat_ellipse(data = coordinates,
+  #              aes(x = `Axis.1`, y = `Axis.2`, color = get(grp)),
+  #               type = "norm", level = 0.68, size = 0.5, alpha = 0.4) +
+  # Emphasize centroids
+  geom_point(data = centroids,
+             aes(x = CentroidX, y = CentroidY, fill = get(grp)),
+             size = 4, shape = 21, stroke = 1.2, color = 'black') +
+  
+  labs(title = paste0(dm_name, ': ', grp),
+       subtitle = subtitle) +
+  
+  xlab(paste('PC1 (', label_percent()(pc_exp[1]), ')', sep = '')) +
+  ylab(paste('PC2 (', label_percent()(pc_exp[2]), ')', sep = '')) +
+  xlim(-0.5,0.3) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = 'black'),
+        legend.position = "top",          # place legend on the right
+        legend.title = element_blank(),     # optional: no title
+        legend.text = element_text(size = 8,face = "bold"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14, face = "bold")) +
+  # Apply custom color scheme
+  scale_color_manual(values = custom_colors)+
+  scale_fill_manual(values = custom_colors)
+  
+  } else {
+    pcoa <- ggplot() +
+      # Smaller scatter points
+      geom_point(data = coordinates,
+                 mapping = aes(x = `Axis.1`, y = `Axis.2`, colour = !!sym(grp)),
+                 alpha = 0.6, size = 0.5) + 
+      
+      labs(title = paste0(dm_name, ': ', grp),
+           subtitle = subtitle) +
+      
+      xlab(paste('PC1 (', label_percent()(pc_exp[1]), ')', sep = '')) +
+      ylab(paste('PC2 (', label_percent()(pc_exp[2]), ')', sep = '')) +
+      
+      theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            axis.line = element_line(colour = 'black'),
+            legend.position = "top",          # place legend on the right
+            legend.title = element_blank(),     # optional: no title
+            legend.text = element_text(size = 8,face = "bold"),
+            axis.text = element_text(size = 12),
+            axis.title = element_text(size = 14, face = "bold")) +
+      # Apply custom color scheme
+      scale_color_manual(values = custom_colors)+
+      scale_fill_manual(values = custom_colors)
+
+    
+      
+  #   pcoa <- ggplot() +
+  #     geom_point(data = coordinates,
+  #                mapping = aes(x = `Axis.1`, y = `Axis.2`, colour = !!sym(grp)),
+  #                alpha = 0.8, size = 1) + 
+  #     labs(title = paste0(dm_name, ': ', grp),
+  #          subtitle = subtitle) +
+  #     geom_segment(data = coordinates,
+  #                  aes(x = CentroidX, xend = Axis.1, y = CentroidY, yend = Axis.2, color = !!sym(grp)),
+  #                  alpha = 0.2, size = 0.5) +
+  #     xlab(paste('PC1 (', label_percent()(pc_exp[1]), ')', sep = '')) +
+  #     ylab(paste('PC2 (', label_percent()(pc_exp[2]), ')', sep = '')) +
+  #     theme(panel.grid.major = element_blank(),
+  #           panel.grid.minor = element_blank(),
+  #           panel.background = element_blank(),
+  #           axis.line = element_line(colour = 'black'),
+  #           legend.title = element_blank(),
+  #           legend.position = 'bottom',
+  #           legend.text = element_text(size = 8)) +
+  #     scale_color_gradient(low = "blue", high = "red")  # Adjust colors for your preference
+  #   
+  }
+  
+  print(pcoa)
+}
+
+# Save mixomics plots
+saveplot = function(plt,filename,w = 5, h = 5) {
+  pdf(file.path(outdir, paste0(filename,".pdf")), width = w, height = h)
+  try({print(plt)}, silent = TRUE)
+  dev.off()
+}
+```
+
+# Microbiome associated with the olink clusters
+
+## PCoA
+
+```{r olink cluster, fig.height=8, fig.width=10}
+colorscheme_BAL_Protein_Cluster = c(
+  "Olink cluster 1" = "orange",
+  "Olink cluster 2" = "darkblue",
+  "Not included" = "grey"
+)
+
+p.tmp <- subset_samples(p.1r, Stage == 'Acute' & BAL_Protein_Cluster!= "Not included")
+grp = 'BAL_Protein_Cluster'
+dm = dist.wUF
+metatable <- p.tmp %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame
+
+create_dt(metatable, 'Metadata of the samples for integration')
+
+dm_name = 'BAL_Protein_Cluster in Acute samples'
+plt = plot_unifrac_longXaxis(dm = dm,metatable = metatable, grp = grp,dm_name = dm_name,permtest = T,custom_colors = colorscheme_BAL_Protein_Cluster)
+ggsave(file.path(outdir,'PCoA.OlinkClusters.pdf'),width = 4,height = 4)
+
+alpha.div.long.extended %>%
+  subset(Stage == 'Acute' & BAL_Protein_Cluster!= "Not included") %>%
+  ggplot(aes(x = get(grp), y = Value, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = colorscheme_BAL_Protein_Cluster) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "Value", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        legend.position = "none")
+
+
+ ggsave(file.path(outdir,'violinPlot.olinkClusters.alpha_groupwise.pdf'),width = 6,height = 8)
+
+
+```
+
+## Hierarchical clustering with the weighted UniFrac distance
+
+Using Ward D clustering algorithm.
+
+Ward D hierarchical clustering (also called Ward's method or Ward.D) is a type of agglomerative hierarchical clustering that minimizes the total within-cluster variance at each step. It is especially useful when you want compact clusters.
+
+```{r hier,fig.width=10,fig.height=8, eval=FALSE}
+dm = dist_subset(dm,rownames(metatable))
+i = 'ward.D'
+hc <- hclust(dm, method = i)
+
+# Plot the dendrogram
+dend <- as.dendrogram(hc)
+tip.cluster = metatable$BAL_Protein_Cluster[match(labels(dend),rownames(metatable))]
+colors <- ifelse(tip.cluster == "Olink cluster 1", "orange",'darkblue')
+
+dend <- dend %>%
+  set("labels_col", colors) %>%  # Apply colors
+  set("labels_cex", 1)         # Optional: Adjust label size for visibility
+
+# Plot the customized dendrogram
+plot(dend, main = paste0("Dendrogram with ",i, ' approach'))
+
+source('plot_hierClust.R')
+```
+
+# Preprocess integration data
+
+## Microbiome part
+
+Here we extract the rarefied OTU count matrix, remove low-abundance OTUs, and perform CLR transformation
+
+Remove low-abundance OTUs: the sum of each OTU across all samples (24 samples in total) * 100 / the sum of all OTU across all samples (24 * 100) <= 0.01
+
+CLR transformation (0.01 pseudo count added beforehand)
+
+```{r preprocess}
+phylo =  p.tmp
+otu.data <- phylo %>%
+  otu_table %>%
+  as.matrix %>%
+  t %>%
+  as.data.frame
+predictor = sample_data(phylo)[['BAL_Protein_Cluster']]
+names(predictor) = rownames(sample_data(phylo))
+table(predictor)
+stopifnot(rownames(otu.data) == names(predictor))
+data.clr = mixomics.CLR(otu.data)
+
+# check the number of variables kept after filtering
+cat('\n\n')
+cat(paste0('Num. OTUs before filtering for low abundance OTUs: ', ncol(otu.data)))
+cat('\n\n')
+cat(paste0('Num. OTUs after filtering for removing low abundance OTUs: ',  ncol(data.clr)))
+cat('\n\n')
+
+```
+
+## Olink data
+
+```{r olink preprocess}
+ol2 = read.csv(file.path(indir,'NPX_List_of_Acute_proteins_in_Olink.csv'), check.names = F)
+ol2 = ol2[-1,-c(2:5)] # remove the subheader row and control column
+
+# add suffix to rows with duplicated assay names (rowname)
+ol2 <- ol2 %>%
+  group_by(NIHID) %>%
+  mutate(NIHID = if (n() == 1) NIHID else paste0(NIHID, "_", row_number())) %>%
+  ungroup() %>%
+  as.data.frame %>%
+  setrowname
+
+# change patient ID to sample.id.new to match to the otu table
+names(ol2) = sample_data(phylo)$sample.id.new[match(names(ol2),sample_data(phylo)$ID)]
+
+# convert all columns to numeric
+ol2[] = apply(ol2,2,as.numeric) 
+saveRDS(ol2,file.path(outdir,'ol2.rds'))
+
+# reorder samples to match the otu table and transpose it
+proteome.matrix <- ol2 %>%
+  dplyr::select(rownames(as.data.frame(data.clr))) %>%
+  as.matrix %>%
+  t
+# sanity check
+stopifnot(all(rownames(proteome.matrix) == rownames(as.data.frame(data.clr))))
+
+# remove the lowly expressed genes (skip this step)
+proteome.matrix.filtered = proteome.matrix
+
+# check the number of variables kept after filtering
+cat('\n\n')
+cat(paste0('Num. Features before filtering for low abundance: ', ncol(proteome.matrix)))
+cat('\n\n')
+cat(paste0('Num. Features after filtering for removing low abundance features: ',  ncol(proteome.matrix.filtered)))
+cat('\n\n')
+
+```
+
+```{r pre-integration sanity check}
+stopifnot(all(rownames(proteome.matrix.filtered) == rownames(as.data.frame(data.clr))))
+stopifnot(all(rownames(proteome.matrix.filtered) == names(predictor)))
+```
+
+
+# sPLS-DA on Olink Data
+
+Here we first attempt to find the most discriminant features that can separate samples into the two clusters using sPLS-DA
+
+## Here we first verify the presence of the two clusters with PCA and PLS-DA
+
+```{r pca plsda on olink}
+olk.pca <- pca(proteome.matrix.filtered, ncomp = 2, scale = TRUE)
+f1 = plotIndiv(olk.pca, group = predictor, ind.names = FALSE,
+          legend = TRUE, 
+          title = 'PEA PCA',
+          style = 'ggplot2', star = TRUE,
+          col = colorscheme_BAL_Protein_Cluster[1:2])
+
+## PLS-DA
+olk.plsda <- plsda(proteome.matrix.filtered,predictor, ncomp = 5) 
+f2 = plotIndiv(olk.plsda, group = predictor, ind.names = FALSE,
+          legend = TRUE, 
+          title = 'PEA, PLSDA comp 1 - 2',
+          style = 'ggplot2', star = TRUE,,
+          col = colorscheme_BAL_Protein_Cluster[1:2])
+
+
+perf.olk.plsda <- perf(olk.plsda, validation = 'Mfold', 
+                               folds = 3, 
+                               progressBar = FALSE, # TRUE to track progress
+                               nrepeat = 50) # we recommend 50 
+plot(perf.olk.plsda, sd = TRUE)
+
+background.max <- background.predict(olk.plsda, 
+                                     comp.predicted = 2,
+                                     dist = 'max.dist') 
+
+f3 = plotIndiv(olk.plsda, comp = 1:2, group = predictor,
+          ind.names = FALSE, title = 'PEA PLSDA',
+          legend = TRUE,  background = background.max,
+          style = 'ggplot2', star = TRUE,,
+          col = colorscheme_BAL_Protein_Cluster[1:2])
+saveplot(f1,'PCA.olink',w=6)
+saveplot(f3,'PLSDA.olink',w=6)
+```
+
+The axis labels indicate the amount of variation explained per component. However, the interpretation of this amount is not as important as in PCA, as PLS-DA aims to maximise the covariance between components associated to X and Y, rather than the variance X.
+
+The results show a distinct clustering pattern.
+
+
+## Heatmap of all proteins
+
+```{r heatmap all proteins,fig.height=15,fig.width=10,eva=F}
+# PEA heatmap
+## Main heatmap
+mat = t(olk.plsda$X)
+cat(paste0('NPX matrix min and max are: ', round(min(mat),digits = 2), ' and ', round(max(mat),digits = 2)))
+## Add loading weightes on the right side as an one-column heatmap
+loading_weight_vector <- olk.plsda$loadings$X %>%
+  as.data.frame %>%
+  dplyr::select(comp1) %>%
+  as.matrix()
+loading_weight_vector <- loading_weight_vector[rownames(mat), , drop = FALSE]
+min(loading_weight_vector)
+max(loading_weight_vector)
+col_fun_loading <- colorRamp2(c(-0.05, 0, 0.03), c("blue", "white", "red"))
+
+htmp.loading.annot.PEA <- rowAnnotation(`Loading weights` = loading_weight_vector,col = list(`Loading weights` = col_fun_loading),show_annotation_name = FALSE)
+
+
+col_fun = colorRamp2(c(-5, 0, 5), c("#2B5C8AFF", "#FFF6EDFF", "#AC4522FF"))
+hm = Heatmap(mat, name = 'PEA full set',
+             column_title = "",
+             show_row_names = F,show_row_dend = T,
+             row_dend_width = unit(30,'mm'),
+             column_dend_height = unit(20,'mm'),
+             show_column_names = T, show_column_dend = T,
+             right_annotation = htmp.loading.annot.PEA,
+             cluster_columns = T,
+             col = col_fun,
+             border_gp = gpar(col = "black", lty = 1),
+             clustering_method_rows = 'ward.D',
+             row_names_max_width = unit(10,'cm')
+)
+
+# Add the outcome variable (olink cluster) as an one-row heatmap at the bottom
+pred.vector <- matrix(predictor,
+                      nrow = 1, 
+                      dimnames = list("PEA Cluster", names(predictor)))
+stopifnot(all(colnames(mat) == colnames(pred.vector)))
+
+htmp.colAnnot <- Heatmap(pred.vector,
+                         name = 'PEA Cluster',
+                         show_row_names = T,
+                         show_row_dend = FALSE,
+                         show_column_names = FALSE,
+                         show_column_dend = FALSE,
+                         col = colorscheme_BAL_Protein_Cluster,
+                         height = unit(8, "mm"),
+                         border_gp = gpar(col = "black", lty = 1),row_names_side = "left")
+
+
+htmp.list2 <- hm %v% htmp.colAnnot
+plt.hm = draw(htmp.list2, 
+     show_heatmap_legend = T, 
+     ht_gap = unit(0.05, "cm"),)
+
+saveplot(plt.hm, 'heatmap.olk.plsda.expression.with.loading', w = 10, h = 15)
+```
+
+# sparse PLS-DA on the olink data
+
+Here we try to identify a core subset of proteins discriminating the two clusters.
+
+## Model tuning to find the best number of features to include in the two PCs
+
+Including 10 features at PC1 already reaches an error rate of 0.0017, and having more features or more PCs does not significantly increase prediction accuracy. So we just keep 10 features. We still keep 20 features on PC2 just for ordination plot. However, in later analysis with microbiome-proteome integration, we only use the 10 top features at PC1 for PLS and sPLS.
+
+```{r splsda olink tune}
+set.seed(666)
+list.keepX <- c(1:9,  seq(10, 100, 10))
+olk.plsda.tune <- tune.splsda(proteome.matrix.filtered,predictor, 
+                              ncomp = 2, validation = 'Mfold', 
+                              folds = 5, dist = 'max.dist', 
+                              test.keepX = list.keepX, nrepeat = 100)
+
+(f4 = plot(olk.plsda.tune, sd = T,optimal = F))
+saveplot(f4,'olk.plsda.tune')
+
+err = as.data.frame(olk.plsda.tune$error.rate)
+create_dt(err,'Error rates')
+```
+
+## Tuned Olink sPLS-DA model
+
+Including 10 features at PC1 already reaches an error rate of 0.0017, and having more features or more PCs does not significantly increase prediction accuracy. So we just keep 10 features. We still keep 20 features on PC2 just for ordination plot. However, in later analysis with microbiome-proteome integration, we only use the 10 top features at PC1 for PLS and sPLS.
+
+```{r splsda tuned}
+set.seed(666)
+
+olk.splsda <- splsda(proteome.matrix.filtered,predictor,
+                     ncomp = 2, keepX = c(10,20)) 
+
+# ordination plot 
+background.max <- background.predict(olk.splsda, 
+                                     comp.predicted = 2,
+                                     dist = 'max.dist') 
+f.p = plotIndiv(olk.splsda, comp = c(1,2),
+          ind.names = FALSE,
+          ellipse = F, legend = TRUE,
+          star = TRUE,
+          title = 'PEA sPLS-DA',style = 'ggplot2',
+          col = colorscheme_BAL_Protein_Cluster[1:2],
+          background = background.max)
+saveplot(f.p,'olk.splsda',w = 6)
+
+# get features in PC1
+olk.splsda.loading.pc1 <- olk.splsda$loadings$X %>%
+  as.data.frame %>%
+  dplyr::select(comp1) %>%
+  dplyr::filter(comp1 != 0) %>%
+  arrange(desc(abs(comp1))) %>%
+  mutate(features = rownames(.))
+
+# loadings
+
+(f.l =ggbarplot(
+  olk.splsda.loading.pc1,
+  x = "features",
+  y = "comp1",
+  fill = "darkred",
+  sort.val = "desc",
+  sort.by.groups = FALSE,
+  orientation = "h",         # Flip axes
+  xlab = "Feature",
+  ylab = "Loadings on PC1",
+  palette = "jco"
+) +
+  theme_pubr() +
+  theme(axis.text.y = element_text(size = 12)))
+saveplot(f.l,'olk.splsda.loading.pc1')
+
+proteome.selected = proteome.matrix.filtered[,rownames(olk.splsda.loading.pc1)]
+
+
+```
+
+# Identify biomarkers in the microbiome data
+
+## PCA on the full microbiome data (after CLR + filtering low OTUs)
+
+The PCA plot shows that there is no clear separation of the two clusters.
+
+```{r 16s pca}
+mb.pca <- pca(data.clr, ncomp = 2, scale = TRUE)
+f1 = plotIndiv(mb.pca, group = predictor, ind.names = FALSE,
+          legend = TRUE, 
+          title = 'Microbiome PCA',
+          style = 'ggplot2', star = TRUE,
+          col = colorscheme_BAL_Protein_Cluster[1:2])
+saveplot(f1, 'mb.pca',w=6)
+```
+
+# CCA and PLS of full microbiome and the selected proteins
+
+CCA and PLS generate very similar results.
+PLS regression of full microbiome data and the selected proteins show a generally trend in agreement in clustering between the two modalities. The two clusters can be separated on PC1, with some exceptions.
+
+```{r 16s pls}
+
+stopifnot(all(rownames(proteome.selected) == rownames(data.clr)))
+
+mb.pls <- pls(data.clr,proteome.selected,ncomp = 2,mode = 'regression') 
+print('PLS correlation coefficients: ')
+cor(mb.pls$variates$X, mb.pls$variates$Y)
+fp = plotIndiv(mb.pls, comp = c(1,2),
+          ind.names = FALSE,
+          #ellipse = TRUE, 
+          legend = TRUE,
+          star = TRUE,
+          title = 'PLS with all OTUs and the selected proteins',style = 'ggplot2',
+          group = predictor,
+          col = colorscheme_BAL_Protein_Cluster[1:2],
+          subtitle = c('Microbiome','PEA'))
+saveplot(fp,'mb.olk.pls',w=10)
+```
+
+# sparse PLS 
+
+Here we use sparse PLS to identify the core subset of OTUs that explains the most of the variance in the selected proteins while providing a good cluster separation pattern.
+
+## Tuning the model to find the best number of OTUs to include in PCs 
+
+```{r spls 16s tune,results='asis',fig.height=20,fig.width=20}
+set.seed(666)
+plot_list <- list()  # initialize an empty list
+for (i in seq(150, 10, -10)){
+  mb.spls <- spls(data.clr, proteome.selected,ncomp = 2,mode = 'regression',keepX = c(i,i))
+  
+  cor.res = cor.test(mb.spls$variates$X[,'comp1'], mb.spls$variates$Y[,'comp1'])
+  cor.res.sel = paste0('coef=',round(cor.res$estimate[[1]],digits = 3))
+  cat(cor.res.sel)
+  
+  cat('\n\n')
+  p= plotIndiv(mb.spls, ind.names = FALSE, legend = TRUE, 
+            title = paste0('nfeature = ',i, ', ',cor.res.sel),
+            size.title = 20,
+            group = predictor,centroid = T,
+          style = 'ggplot2', star = TRUE,,
+          col = colorscheme_BAL_Protein_Cluster[1:2],subtitle = c('Microbiome','PEA'),
+          legend.position = 'top')$graph
+  plot_list[[paste0("n", i)]] <- p
+}
+
+# Combine all plots (e.g., 3 columns)
+combined_plot <- plot_grid(plotlist = plot_list, ncol = 5, align = "hv")
+
+# Display or save
+print(combined_plot)
+saveplot(combined_plot,'spls.mb.olk.tuning.10-150features',w = 30,h = 15)
+```
+
+## sPLS with 50 OTUs (and 10 proteins)
+
+```{r spls 16s}
+set.seed(666)
+mb.spls <- spls(data.clr,proteome.selected,ncomp = 2,mode = 'regression',keepX = c(50,50))
+
+print('PLS correlation coefficients: ')
+cor(mb.spls$variates$X, mb.spls$variates$Y)
+
+f1 = plotIndiv(mb.spls, ind.names = FALSE, legend = TRUE, 
+           title = 'sPLS with selected OTUs and proteins',group = predictor, centroid = T,
+          style = 'ggplot2', star = TRUE,,
+          col = colorscheme_BAL_Protein_Cluster[1:2],subtitle = c('Microbiome','PEA'))
+saveplot(f1,'spls.mb.olk',w = 10)
+```
+
+```{r spls loadings,fig.height=24,fig.width=12}
+
+otutaxa = tax_table(p.1r) %>% as.data.frame
+mb.spls.loading.pc1 <- mb.spls$loadings$X %>%
+  as.data.frame %>%
+  dplyr::select(comp1) %>%
+  dplyr::filter(comp1 != 0) %>%
+  merge(.,otutaxa, by = 0, all.x = T) %>%
+  mutate(abs_comp1 = abs(comp1),
+         genus_otu = paste0(Row.names, ' (',Genus,')'),
+         genus_otu = sub('Otu','OTU ',genus_otu)) %>%
+  arrange(desc(abs_comp1)) 
+
+mb.spls.olk.loading.pc1 <- mb.spls$loadings$Y %>%
+  as.data.frame %>%
+  dplyr::select(comp1) %>%
+  dplyr::filter(comp1 != 0) %>%
+  arrange(desc(abs(comp1))) %>%
+  mutate(Row.names = rownames(.))
+
+mb.spls.loading.pc1.combined = bind_rows(
+  mb.spls.loading.pc1 %>%
+    transmute(
+      Features = genus_otu,
+      comp1 = comp1,
+      block = 'Microbiome'
+    ) %>%
+    arrange(desc(comp1)),
+  mb.spls.olk.loading.pc1 %>%
+    transmute(
+      Features = Row.names,
+      comp1 = comp1,
+      block = 'PEA'
+    )
+) %>%
+  mutate(Features = factor(Features,levels = Features),
+         direction = case_when(comp1 > 0 ~ 'Positive',
+                               comp1 < 0 ~ 'Negative'))
+(f.l <- ggbarplot(
+  mb.spls.loading.pc1.combined,
+  x = "Features",
+  y = "comp1",
+  fill = "direction",
+  sort.val = "none",
+  sort.by.groups = FALSE,
+  orientation = "h",          # horizontal bars (internally uses coord_flip)
+  xlab = "Features",
+  ylab = "Loadings on PC1",
+) +
+  theme_pubr() +
+  theme(
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 18),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    legend.position = "none"
+  ) +
+  scale_fill_manual(values = c("#2B5C8AFF","#AC4522FF")))
+
+
+saveplot(f.l,'mb.spls.loading.pc1.combined',h=12,w=10)
+```
+
+## Heatmap (transformed count of each selected feature)
+
+```{r heatmaps,fig.height=12,fig.width=20}
+# PEA heatmap
+## Main heatmap
+mat = t(mb.spls$Y)
+cat(paste0('NPX matrix min and max are: ', round(min(mat),digits = 2), ' and ', round(max(mat),digits = 2)))
+## Add loading weightes on the right side as an one-column heatmap
+loading_weight_vector <- mb.spls.olk.loading.pc1 %>%
+  dplyr::select(comp1) %>%
+  as.matrix()
+loading_weight_vector <- loading_weight_vector[rownames(mat), , drop = FALSE]
+col_fun_loading <- colorRamp2(c(-0.4, 0, 0.2), c("#2B5C8AFF", "#FFF6EDFF", "#AC4522FF"))
+
+htmp.loading.annot.PEA <- rowAnnotation(`Loading weights` = loading_weight_vector,col = list(`Loading weights` = col_fun_loading),show_annotation_name = FALSE)
+
+
+col_fun = colorRamp2(c(-2, 0, 2), c("orange", "#FFF6EDFF", "darkblue"))
+hm = Heatmap(mat, name = 'PEA',
+             column_title = "",
+             show_row_names = T,show_row_dend = T,
+             row_dend_width = unit(30,'mm'),
+             column_dend_height = unit(20,'mm'),
+             show_column_names = T, show_column_dend = T,
+             right_annotation = htmp.loading.annot.PEA,
+             cluster_columns = T,
+             col = col_fun,
+             border_gp = gpar(col = "black", lty = 1),
+             clustering_method_rows = 'ward.D',
+             row_names_max_width = unit(10,'cm')
+)
+
+# Microbiome heatmap
+## main heatmap
+mat = t(mb.spls$X[,mb.spls.loading.pc1$Row.names])
+rownames(mat) <- mb.spls.loading.pc1$genus_otu[match(rownames(mat), mb.spls.loading.pc1$Row.names)]
+cat(paste0('microbiome matrix min and max are: ', round(min(mat),digits = 2), ' and ', round(max(mat),digits = 2)))
+
+## Add loading weight as an one-column heatmap to the right of the main heatmap
+loading_weight_vector <- mb.spls.loading.pc1 %>%
+  dplyr::select(genus_otu, comp1) %>%
+  distinct() %>%
+  tibble::column_to_rownames("genus_otu") %>%
+  as.matrix()
+loading_weight_vector <- loading_weight_vector[rownames(mat), , drop = FALSE]
+htmp.loading.annot.microbiome <- rowAnnotation(`Loading weights` = loading_weight_vector,col = list(`Loading weights` = col_fun_loading),show_annotation_name = FALSE)
+
+
+col_fun2 = colorRamp2(c(-2, 0, 5), c("orange", "#FFF6EDFF", "darkblue"))
+hm2 = Heatmap(mat, name = 'Microbiome',
+             column_title = "",
+             show_row_names = T,show_row_dend = T,
+             right_annotation = htmp.loading.annot.microbiome,
+             row_dend_width = unit(30,'mm'),
+             column_dend_height = unit(20,'mm'),
+             show_column_names = T, show_column_dend = F,
+             cluster_columns = F,
+             col = col_fun2,
+             border_gp = gpar(col = "black", lty = 1),
+             clustering_method_rows = 'ward.D',
+             row_names_max_width = unit(10,'cm')
+)
+
+# Add the outcome variable (olink cluster) as an one-row heatmap at the bottom
+pred.vector <- matrix(predictor,
+                      nrow = 1, 
+                      dimnames = list("PEA Cluster", names(predictor)))
+stopifnot(all(colnames(mat) == colnames(pred.vector)))
+
+htmp.colAnnot <- Heatmap(pred.vector,
+                         name = 'PEA Cluster',
+                         show_row_names = TRUE,
+                         show_row_dend = FALSE,
+                         show_column_names = FALSE,
+                         show_column_dend = FALSE,
+                         col = colorscheme_BAL_Protein_Cluster,
+                         height = unit(8, "mm"),
+                         border_gp = gpar(col = "black", lty = 1),row_names_side = "left")
+
+# Add the outcome variable (severity) as an one-row heatmap at the bottom
+sev.vector <- phylo %>%
+  sample_data() %>%
+  as.matrix %>%
+  as.data.frame %>%
+  dplyr::select(disease_severity) %>% 
+  as.matrix %>%
+  t
+sev.vector = sev.vector[, colnames(pred.vector),drop = FALSE]
+stopifnot(all(colnames(sev.vector) == colnames(mat)))
+
+htmp.colAnnot2 <- Heatmap(sev.vector,
+                         name = 'Disease Severity',
+                         show_row_names = TRUE,
+                         show_row_dend = FALSE,
+                         show_column_names = FALSE,
+                         show_column_dend = FALSE,
+                         col = colorscheme_severity,
+                         height = unit(8, "mm"),
+                         border_gp = gpar(col = "black", lty = 1),row_names_side = "left")
+
+
+htmp.list2 <- hm %v% hm2 %v% htmp.colAnnot %v% htmp.colAnnot2
+plt.hm = draw(htmp.list2, 
+     show_heatmap_legend = T, 
+     ht_gap = unit(0.05, "cm"),)
+
+saveplot(plt.hm, 'heatmap.mb.olk.spls.expression.with.loading', w = 11, h = 10)
+
+
+```
+
+# Save session
+
+```{r save session}
+sessionInfo()
+save.image(file.path(outdir,'Multiomics_analysis_sPLS_cleanCodes.Rdata'))
+
+```
