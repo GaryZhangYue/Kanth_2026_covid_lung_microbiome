@@ -1,0 +1,404 @@
+---
+title: "Formal analysis -- 3.b Diversity: Stage comparison"
+subtitle: "All stages and HC"
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+## initiate ---------------------------------------------------------
+packages_to_load = c('ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel','purrr','dplyr','dendextend','lmerTest','Maaslin2',
+                     'performance', 'ComplexHeatmap','circlize','forcats','ggalluvial')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions and image,eval=TRUE}
+outdir = "../data/Results_publication_ready"
+p.1r = readRDS(file.path(outdir,'phyloseqObj.specimen.deduplicated.correctedMetadata.rarefied.rds'))
+
+source('utils_functions.R')
+source('auxiliaries.R')
+```
+
+```{r beta div,eval=T}
+dist.wUF = readRDS(file.path(outdir,'dist.weightedUniFrac.RDS'))
+alpha.div = readRDS(file.path(outdir,'alpha.diversity.rds'))
+```
+
+# Remove duplicated recovery samples
+
+```{r remove duplicate recovery samples}
+samples.duplicate.recovery = readRDS(file.path(outdir,'duplicate_recovery_samples_to_remove.RDS'))
+p.1r = prune_samples(setdiff(sample_names(p.1r),samples.duplicate.recovery$sample.id.new),p.1r)
+
+# sanity check
+meta_df <- as.data.frame(as.matrix(sample_data(p.1r)))
+dup.check <- meta_df %>%
+  filter(Stage != "Healthy Volunteers") %>%
+  count(ID, Stage, name = "n") %>% # Counts how many rows exist for each combination
+  filter(n > 1)
+```
+
+
+# Differential abundance analysis
+
+## Compare each disease stage against healthy volunteers
+
+Here we set HV as the reference level, with including sex, age, and race as covariates. 
+
+```{r stage VS hc diff}
+psq.tmp = p.1r 
+feature = 'Genus'
+res_dir = file.path(outdir,'maaslin2','Stages_vs_HC')
+regenerate_dir(res_dir)
+input.tmp = prep_maaslin2_input(psq.tmp = psq.tmp, feature = feature, res_dir = res_dir)
+exps = input.tmp[[1]]
+pheno = input.tmp[[2]]
+
+fit1 = capture.output(
+  Maaslin2(input_data = exps, # capture.out is used to mutate verbose output by maaslin
+           input_metadata = pheno,
+           min_prevalence = 0.5, # the minimum percent of samples for which a feature is detected at minimum abundance (default 0.1)
+           min_abundance = 0.05, # The minimum abundance for each feature (default 0)
+           normalization = 'None', # default TSS
+           transform = 'LOG', # default log 
+           fixed_effects = c('Stage','race','gender','age'),
+           reference = c('Stage,Healthy_Volunteers'),
+           cores = 1,
+           max_significance = 0.3, # this is set to high value so that maaslin automatically plot every figure that might need in future, #FDR q value threshold
+           output = res_dir))
+res <- read.csv(paste(res_dir, 'all_results.tsv', sep = '/'), sep = '\t') %>%
+  filter(metadata == 'Stage') %>%
+  group_by(value) %>%
+  mutate(qval = p.adjust(pval, method = 'BH')) %>%
+  ungroup()
+write.table(res,paste(res_dir, 'all_results_filtered_by_Stage.tsv', sep = '/'), sep = '\t', quote = F, row.names = F)
+
+create_dt(exps,'Maaslin2 input1: feature table')
+create_dt(pheno,'Maaslin2 input2: phenotype table')
+create_dt(res %>% filter(qval < 0.05),'Maaslin2 results (q <0.05)')
+
+plt = plot_lfc(res,0.05,colorpalette = colorscheme)
+print(plt)
+ggsave(file.path(outdir,'forestPlot.stageVSHC.q0.05.pdf'),width = 5,height = 5)
+
+```
+
+# Fit Genus relative abundance to Weighted UniFrac PCoA (copied from 3.Diversity_analysis.Rmd)
+
+```{r tax envfit}
+grp = 'Stage'
+dm = dist.wUF
+metatable <- p.1r %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame
+metatable[['Stage']] = factor(metatable[['Stage']],levels = Stages.HC.vec)
+
+dm_name = 'Weighted UniFrac'
+envfitDf = tax_agg(p=p.1r)
+topN_envfit_variables_to_plot = 3 # plot only arrows with FDR < 0.05, select arrows by R2. Select top3 which has r^2 > 0.3
+
+env.taxa = plot_envifit(dm = dm,metatable = metatable, 
+                        grp = grp ,dm_name = dm_name, 
+                        envfitDf = envfitDf, topN_envfit_variables_to_plot = topN_envfit_variables_to_plot,
+                        custom_colors = colorscheme,arrowshrinkingby = 0.5)
+
+# print pcoa plot with gg_text_repel as a still image
+print(env.taxa[[1]])
+ggsave(filename = file.path(outdir,"PCoA.envFit.weightedUF.BAL+BALHC.pdf"), plot = env.taxa[[1]], width = 5, height = 5.5)
+create_dt(env.taxa[[4]],'EnvFit')
+```
+
+# Permanova and Permdisp tests {.tabset}
+
+## PCoA
+
+```{r pcoa plot}
+## weighted unifrac ---------------
+grp = 'Stage'
+dm = dist.wUF
+metatable <- p.1r %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame
+metatable[['Stage']] = factor(metatable[['Stage']],levels = Stages.HC.vec)
+dm_name = 'Weighted UniFrac'
+
+cat('\n\n')
+cat('### PCoA plot')
+cat('\n\n')
+
+plt = plot_unifrac(dm = dm,metatable = metatable, grp = grp,dm_name = dm_name,permtest = T,custom_colors = colorscheme)
+
+```
+
+## Compare stages pairwisely with blocking by patients
+
+```{r}
+# test results 
+## paired tests ---
+cat('\n\n')
+cat('### Permutational test raw output (compare stages; paired by patientID)')
+cat('\n\n')
+perm.res <- lapply(stageTest.paired, function(groups) {
+  perm_test.blocked(metatable, dm, groups)
+})
+cat('\n\n')
+cat('### Permutational test p value summary (compare stages; paired)')
+cat('\n\n')
+perm.res.df <- do.call(rbind, lapply(perm.res, function(x) {
+  data.frame(comparison = x[1], permanova_p_value = x[2], permdisp_p_value = x[3], patient.count = x[4], stringsAsFactors = FALSE)
+}))
+create_dt(perm.res.df,'Summary of permutational analysis p values')
+write.csv(perm.res.df,file.path(outdir,'weightedUnifrac.permTests.stagePairs.blockByPatients.csv'))
+```
+
+## Compare every disease stage to HC {.tabset}
+
+```{r perm 2}
+## unpaired tests ---
+cat('\n\n')
+cat('### Permutational test raw output (compare HC to each stage; unpaired)')
+cat('\n\n')
+perm.res <- lapply(stageTest.unpaired, function(groups) {
+  perm_test(metatable, dm, groups)
+})
+
+cat('\n\n')
+cat('### Permutational test p value summary (compare HC to each stage; unpaired)')
+cat('\n\n')
+perm.res.df <- do.call(rbind, lapply(perm.res, function(x) {
+  data.frame(comparison = x[1], permanova_p_value = x[2], permdisp_p_value = x[3], stringsAsFactors = FALSE)
+}))
+
+create_dt(perm.res.df,'Summary of permutational analysis p values')
+write.csv(perm.res.df,file.path(outdir,'weightedUnifrac.permTests.stagesVSHC.csv'))
+```
+
+
+# Top genera relative abundance alluvium plot
+
+## Top genera across all samples
+
+note that Ecoli is removed. unclassified genera are merged into others, which is not shown.
+
+```{r alluvian style2,fig.height=20, fig.width=18}
+psq.tmp = p.1r
+
+pheno <- psq.tmp %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame %>% 
+  select(c("sample.id.new","Stage"))
+
+id.a <- pheno %>%
+  filter(Stage == 'Acute') %>%
+  pull(sample.id.new)
+id.r <- pheno %>%
+  filter(Stage == 'Recovery') %>%
+  pull(sample.id.new)
+id.c <- pheno %>%
+  filter(Stage == 'Convalescent') %>%
+  pull(sample.id.new)
+id.e <- pheno %>%
+  filter(Stage == 'Extended') %>%
+  pull(sample.id.new)
+id.h <- pheno %>%
+  filter(Stage == 'Healthy Volunteers') %>%
+  pull(sample.id.new)
+
+exps <- taxReadCount_collapse_topn_from_phyloseq(psq.tmp,'Genus',sample_list = sample_names(psq.tmp),topn = 11,merge_unclassified = T)[[2]] %>%
+      as.matrix %>%
+      as.data.frame %>%
+      setrowname 
+exps[] <- lapply(exps, function(x) as.numeric(as.character(x)))
+exps = exps/100 # originally each column adds up to 100
+exps = exps[-nrow(exps),] # remove the "Others" row
+exps = exps[-which(rownames(exps) == "Escherichia/Shigella"),]
+
+# 1) Means
+id.a.mean <- rowMeans(exps[, id.a, drop = FALSE], na.rm = TRUE)
+id.r.mean <- rowMeans(exps[, id.r, drop = FALSE], na.rm = TRUE)
+id.c.mean <- rowMeans(exps[, id.c, drop = FALSE], na.rm = TRUE)
+id.e.mean <- rowMeans(exps[, id.e, drop = FALSE], na.rm = TRUE)
+id.h.mean <- rowMeans(exps[, id.h, drop = FALSE], na.rm = TRUE)
+
+mean_df <- tibble(
+  genus = rownames(exps),
+  Acute = id.a.mean,
+  Recovery = id.r.mean,
+  Convalescent = id.c.mean,
+  Extended = id.e.mean,
+  `Healthy Volunteers` = id.h.mean,
+)
+
+# 2) Group-specific orders (within those 10 genera)
+order.a <- mean_df %>%
+  arrange(desc(Acute)) %>%
+  pull(genus)
+order.r <- mean_df %>%
+  arrange(desc(Recovery)) %>%
+  pull(genus)
+order.c <- mean_df %>%
+  arrange(desc(Convalescent)) %>%
+  pull(genus)
+order.e <- mean_df %>%
+  arrange(desc(Extended)) %>%
+  pull(genus)
+order.h <- mean_df %>%
+  arrange(desc(`Healthy Volunteers`)) %>%
+  pull(genus)
+
+# 4) Long data + group-specific stratum factor
+plot_df <- mean_df %>%
+  pivot_longer(Stages.HC.vec, names_to = "group", values_to = "abundance") %>%
+  mutate(
+    group = factor(group, levels = Stages.HC.vec),
+    # make a group-specific stratum label so each side can have its own order
+    stratum_id = paste0(group,genus)
+  )
+
+# set stratum levels: 
+plot_df$stratum_id <- factor(plot_df$stratum_id, 
+                             levels = c(paste0('Acute',order.a),
+                                        paste0('Recovery',order.r),
+                                        paste0('Convalescent',order.c),
+                                        paste0('Extended',order.e),
+                                        paste0('Healthy Volunteers',order.h)))
+
+# 5) Plot 
+# Show a label for each block ( number only (x%))
+plot_df <- plot_df %>%
+  mutate(genus = factor(genus, levels = order.a),
+         genus_perc = paste0(round(abundance * 100, 0), "%"))
+create_dt(plot_df,'Top 10 genera in specimen')
+ggplot(plot_df,
+       aes(x = group,
+           stratum = stratum_id,      # <- group-specific ordering
+           alluvium = genus,          # <- links the same genus across sides
+           y = abundance,
+           fill = genus)) +
+  scale_x_discrete(expand = c(.1, .1)) +
+  geom_flow(alpha = 0.6,width = 0.6) +
+  geom_stratum(alpha = 0.85, color = "grey20", width = 0.6) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  theme_minimal(base_size = 12) +
+  scale_fill_manual(values = col21) +   
+  xlab('') +
+  ylab('Relative abundance') +
+  theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = 'black'),
+      legend.position = "bottom",          # place legend on the right
+      legend.title = element_blank(),     # optional: no title
+      legend.text = element_text(size = 22,face = "bold"),
+      axis.text = element_text(size = 22,face = 'bold', colour = "black"),
+      axis.text.x = element_text(angle = 40, size = 22, vjust = 1, hjust = 1, face = "bold",colour = "black"),
+      axis.title = element_text(size = 22, face = "bold", colour = "black")) +
+  guides(fill = guide_legend(nrow = 5, byrow = TRUE)) +
+  ggtitle("Top 10 Genera selected by average across all samples",
+          subtitle = "Ecoli is removed. unclassified genera are merged into others, which is not shown.") +
+  geom_text(
+    stat = "stratum",
+    aes(label =  ifelse(abundance > 0.005, as.character(genus_perc), '')),   # <-- cleaned name
+    size = 10,
+    color = "black"
+  )
+ggsave(file.path(outdir,'Alluvium.top10GeneraInAllSamples.StagesAndHC.percOnly.pdf'),width = 12,height = 18)
+
+
+```
+
+
+# Alpha diversity
+
+```{r alpha}
+metatable <- p.1r %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame
+
+alpha.div.long <- metatable %>%
+  select(ID,Stage) %>%
+  merge(.,alpha.div,by=0,all.x=T) %>%
+  pivot_longer(cols = c('Observed','Shannon'), # Columns to stack
+               names_to = "Metric",                           # New column for metric names
+               values_to = "Value") %>%
+  dplyr::mutate(Stage = factor(Stage,levels = Stages.HC.vec)) %>%
+  dplyr::mutate(Metric = ifelse(Metric == 'Observed', 'Observed OTUs',
+                                ifelse(Metric == 'Shannon', 'Shannon Index','ERROR')))
+
+alpha.div.long %>%
+  ggplot(aes(x = Stage, y = Value, fill = Stage)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = colorscheme) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = stageTest.unpaired,   
+    label = "p.signif",            
+    color = "darkred",
+    size = 6
+  ) +
+  labs(x = " ", y = "Metric value", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1,face = 'bold',size = 15),
+    axis.text.y = element_text(angle = 20, hjust = 1,face = 'bold',size = 15),
+    axis.title.y = element_text(face = 'bold',size = 20),
+    legend.position = "none"
+  )
+ggsave(file.path(outdir,'violinPlot.alpha.Stages_vs_HC.pdf'),width = 10,height = 8)
+
+alpha.stat <- compare_means(
+  Value ~ Stage, 
+  data = alpha.div.long, 
+  group.by = 'Metric',
+  method = "wilcox.test", 
+  comparisons = stageTest.unpaired) %>% 
+  filter(group2 == 'Healthy Volunteers') 
+
+alpha.stat %>%
+  create_dt(.,'Alpha diversity statistical comparisons')
+alpha.stat %>%
+  write.csv(.,file.path(outdir,'alphaDiversity.stats.stagesVSHC.csv'))
+```
+
+# Session information
+
+```{r sess info}
+sessionInfo()
+
+```

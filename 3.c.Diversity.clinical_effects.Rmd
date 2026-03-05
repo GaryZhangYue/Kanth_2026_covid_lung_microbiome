@@ -1,0 +1,291 @@
+---
+title: "Formal analysis -- 3.c Diversity: Acute stage clinical group comparison"
+subtitle: "Analysis of treatment, illness severity, vaccinatin and covid variant effect"
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+## initiate ---------------------------------------------------------
+packages_to_load = c('ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel','purrr','dplyr','dendextend','lmerTest','Maaslin2',
+                     'performance', 'ComplexHeatmap','circlize','forcats','ggalluvial')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions and image,eval=TRUE}
+outdir = "../data/Results_publication_ready"
+p.1r = readRDS(file.path(outdir,'phyloseqObj.specimen.deduplicated.correctedMetadata.rarefied.rds'))
+
+source('utils_functions.R')
+source('auxiliaries.R')
+```
+
+```{r div,eval=T}
+dist.wUF = readRDS(file.path(outdir,'dist.weightedUniFrac.RDS'))
+alpha.div = readRDS(file.path(outdir,'alpha.diversity.rds'))
+```
+
+```{r alpha div,eval=T}
+
+metatable.p.1r <- p.1r %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame
+
+alpha.div.long <- metatable.p.1r %>%
+  select(ID,Stage) %>%
+  merge(.,alpha.div,by=0) %>%
+  pivot_longer(cols = c('Observed','Shannon'), # Columns to stack
+               names_to = "Metric",                           # New column for metric names
+               values_to = "Value") %>%
+  dplyr::mutate(Stage = factor(Stage,levels = Stages.HC.vec)) %>%
+  dplyr::mutate(Metric = ifelse(Metric == 'Observed', 'Observed OTUs',
+                                ifelse(Metric == 'Shannon', 'Shannon Index','ERROR')))
+
+alpha.div.long.extended <- metatable.p.1r %>%
+  select(cols <- c("sample.id.new","gender","race","age",
+                   "vaccination","disease_severity","antibiotics_antiviral_usage",
+                   "treatment","BAL_Protein_Cluster","daysSinceSymptomOnset","Omicron")) %>%
+  merge(alpha.div.long,.,by.x = 'Row.names',by.y = "sample.id.new", all.x = T) %>%
+  mutate(daysSinceSymptomOnset = as.numeric(daysSinceSymptomOnset))
+
+
+
+```
+
+
+# Treatment effects
+
+As all treated samples are in pre-Omicron group, we only look at treatment effect in this group
+
+## Treated vs Untreated in Acute samples in pre-Omicron
+
+```{r treatment 1,results='asis'}
+dm_name = 'Treated vs Untreated in Acute samples in pre-Omicron'
+
+p.tmp <- subset_samples(p.1r, Omicron == 'Pre-Omicron' & Stage == 'Acute')
+grp = 'treatment'
+dm = dist.wUF
+metatable <- p.tmp %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame 
+table(metatable$disease_severity,metatable$treatment)
+
+plt = plot_unifrac(dm = dm,metatable = metatable, grp = grp,dm_name = dm_name,permtest = T,custom_colors = colorscheme_treatment)
+ggsave(file.path(outdir,'PCoA.weightedUniFrac.treatment.acuteOnly.preomicronOnly.pdf'),width = 4,height = 4)
+
+res = perm_test_customized_groups(dm = dm,metatable = metatable,grp = grp) 
+data.frame('comparison' = res[1],
+           'adonis p' = res[2],
+           'permdisp p' = res[3]) %>%
+  create_dt(.,'adonis and permdisp p values')
+
+
+alpha.div.long.extended %>%
+  subset(Omicron == 'Pre-Omicron' & Stage == 'Acute') %>%
+  ggplot(aes(x = get(grp), y = Value, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = colorscheme_treatment) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "Value", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        legend.position = "none")
+
+ggsave(file.path(outdir,'violinPlot.treatment.acuteOnly.preomicronOnly.pdf'),width = 6,height = 6)
+
+alpha.div.long.extended %>%
+  subset(Omicron == 'Pre-Omicron' & Stage == 'Acute') %>%
+  summarize_grouped_stats(.,c(grp,'Metric'),'Value') %>%
+  create_dt(.,'Alpha diversity metrics summary')
+```
+
+## Antiviral, antibiotics, and outliers marked out
+
+```{r treatment specific pcoa, eval=FALSE}
+p.tmp <- subset_samples(p.1r, Omicron == 'Pre-Omicron' & Stage == 'Acute')
+
+dm = dist.wUF
+metatable <- p.tmp %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame 
+
+metatable$antibiotics_antiviral_usage[metatable$ID == 'ID_110'] <- 'Outlier'
+metatable$antibiotics_antiviral_usage[metatable$antibiotics_antiviral_usage ==  "Not used" ] <- 'Untreated'
+metatable$antibiotics_antiviral_usage = factor(metatable$antibiotics_antiviral_usage,levels = c("Antiviral + Antibiotics","Antiviral","Untreated","Outlier"))
+colorscheme_antibiotics_antiviral_usage <-
+  c(
+  "Antiviral + Antibiotics" = "orange",
+  "Untreated" = "darkblue",
+  "Antiviral" = "darkred",
+  "Outlier"   = "grey"
+)
+grp = 'antibiotics_antiviral_usage'
+plt = plot_unifrac(dm = dm,metatable = metatable, grp = grp,dm_name = dm_name,permtest = T,custom_colors = colorscheme_antibiotics_antiviral_usage)
+ggsave(file.path(outdir,'PCoA.weightedUniFrac.antibio_outlier_antiviral.acuteOnly.preomicronOnly.pdf'),width = 4,height = 4)
+ggsave(file.path(outdir,'PCoA.weightedUniFrac.antibio_outlier_antiviral.acuteOnly.preomicronOnly.largesize.pdf'),width = 10,height = 10)
+```
+
+# Disease severity
+
+```{r disease severity preom, results='asis',fig.height=8,fig.width=10,eval=TRUE}
+## ---
+
+dm_name = 'Disease severity in acute stage in pre-Omicron'
+
+
+p.tmp <- subset_samples(p.1r, Stage == 'Acute' & Omicron == 'Pre-Omicron')
+
+grp = 'disease_severity'
+dm = dist.wUF
+metatable <- p.tmp %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame
+
+plt = plot_unifrac(dm = dm,metatable = metatable, grp = grp,dm_name = dm_name,permtest = T,custom_colors = colorscheme_severity)
+ggsave(file.path(outdir,'PCoA.weightedUniFrac.Severity.preOmicronOnly.acuteOnly.pdf'),width = 4,height = 4)
+
+
+alpha.div.long.extended %>%
+  subset(Stage == 'Acute' & Omicron == 'Pre-Omicron') %>%
+  ggplot(aes(x = get(grp), y = Value, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = colorscheme_severity) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "Value", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        legend.position = "none")
+ggsave(file.path(outdir,'violinPlot.Severity.preOmicronOnly.acuteOnly.pdf'),width = 6,height = 6)
+
+alpha.div.long.extended %>%
+  subset(Stage == 'Acute' & Omicron == 'Pre-Omicron') %>%
+  summarize_grouped_stats(.,c(grp,'Metric'),'Value') %>%
+  create_dt(.,'Alpha diversity metrics summary')
+
+```
+
+# Vaccination effects
+
+```{r acute preom vax status, results='asis',fig.height=8,fig.width=10, eval=TRUE}
+## ---
+dm_name = 'Vaccination in acute Preomicron'
+
+
+p.tmp <- subset_samples(p.1r, Stage == 'Acute' & Omicron == 'Pre-Omicron')
+grp = 'vaccination'
+dm = dist.wUF
+metatable <- p.tmp %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame 
+
+table(metatable$Omicron,metatable$vaccination)
+plt = plot_unifrac(dm = dm,metatable = metatable, grp = grp,dm_name = dm_name,permtest = T,custom_colors = colorscheme_vaccination)
+ggsave(file.path(outdir,'PCoA.weightedUniFrac.vaccination.acuteOnly.preomicronOnly.pdf'),width = 4,height = 4)
+
+alpha.div.long.extended %>%
+  subset(Stage == 'Acute' & Omicron == 'Pre-Omicron') %>%
+  ggplot(aes(x = get(grp), y = Value, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = colorscheme_vaccination) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "Value", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        legend.position = "none")
+  
+ggsave(file.path(outdir,'violinPlot.vaccination.acuteOnly.preomicronOnly.pdf'),width = 6,height = 6)
+
+alpha.div.long.extended %>%
+  subset(Stage == 'Acute' & Omicron == 'Pre-Omicron') %>%
+  summarize_grouped_stats(.,c(grp,'Metric'),'Value') %>%
+  create_dt(.,'Alpha diversity metrics summary')
+
+```
+
+# How does omicron influence microbiome?
+
+
+```{r om preom acute only, results='asis',fig.height=8,fig.width=10}
+dm_name = 'Omicron vs Preomicron in acute stages'
+
+
+p.tmp <- subset_samples(p.1r, Stage == 'Acute' & Omicron != 'Unknown')
+grp = 'Omicron'
+dm = dist.wUF
+metatable <- p.tmp %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame
+
+plt = plot_unifrac(dm = dm,metatable = metatable, grp = grp,dm_name = dm_name,permtest = T,custom_colors = colorscheme_omicron)
+ggsave(file.path(outdir,'PCoA.weightedUniFrac.Omicron.acuteOnly.pdf'),width = 4,height = 4)
+
+alpha.div.long.extended %>%
+  subset(Stage == 'Acute' & Omicron != 'Unknown') %>%
+ggplot(aes(x = get(grp), y = Value, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = colorscheme_omicron) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "Value", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        legend.position = "none")
+ggsave(file.path(outdir,'violinPlot.omicronVSpreomicron.alpha_groupwise.acuteOnly.pdf'),width = 6,height = 6)
+ 
+alpha.div.long.extended %>%
+  subset(Stage == 'Acute' & Omicron != 'Unknown') %>%
+  summarize_grouped_stats(.,c(grp,'Metric'),'Value') %>%
+  create_dt(.,'Alpha diversity metrics summary')
+
+```
+
+
+
+# Session Information
+
+```{r sess}
+save.image(file.path(outdir,'3.c.Diversity.clinical_effects.rdata'))
+sessionInfo()
+```

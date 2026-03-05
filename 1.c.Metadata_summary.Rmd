@@ -1,0 +1,364 @@
+---
+title: "Formal analysis -- 1.c Metadata summary"
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+## initiate ---------------------------------------------------------
+packages_to_load = c('ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel','purrr','dplyr','dendextend','lmerTest','Maaslin2',
+                     'performance', 'ComplexHeatmap','circlize','openxlsx')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions and image,eval=TRUE}
+outdir = "../data/Results_publication_ready"
+p.1r = readRDS(file.path(outdir,'phyloseqObj.specimen.deduplicated.correctedMetadata.rarefied.rds'))
+p.all = readRDS(file.path(outdir,'phyloseqObj.all_samples.deduplicated.unrarefied.rds'))
+allAnalysis.df = readRDS(file.path(outdir,'heatmap.metadata.rds'))
+
+source('utils_functions.R')
+source('auxiliaries.R')
+
+```
+
+# Read counts
+
+Read count statistics of all specimens before rarefaction, including BAL (BAL-HC) specimens regardless of rarefaction status.
+
+```{r read counts} 
+p.1 = subset_samples(p.all,specimen_control == 'specimen')
+p.1.readcount = as.data.frame(sample_sums(p.1)) 
+names(p.1.readcount) <- 'num_reads'
+stats_df <- data.frame(
+  mean    = mean(p.1.readcount$num_reads),
+  sd      = sd(p.1.readcount$num_reads),
+  min     = min(p.1.readcount$num_reads),
+  q1      = quantile(p.1.readcount$num_reads, 0.25),
+  median  = median(p.1.readcount$num_reads),
+  q3      = quantile(p.1.readcount$num_reads, 0.75),
+  max     = max(p.1.readcount$num_reads),
+  sum     = sum(p.1.readcount$num_reads)
+)
+rownames(stats_df) <- 'Number of reads'
+create_dt(stats_df,'Read count statistics of all specimens before rarefaction')
+```
+
+# Rarefied
+
+## Metadata summary
+
+Results saved in excel spreadsheet named metadata.rarefied.summary.xlsx
+
+```{r metadata, results='asis'}
+metadata <- p.1r %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame %>%
+  mutate(Stage = factor(Stage,levels = Stages.HC.vec))
+
+cat(paste0('Total number of patient (excluding HC) in after rarefaction: ',
+           length(unique(metadata[metadata$Stage != 'Healthy Volunteers',]$ID))))
+
+
+# generate another column named PEA avaibility for row annotation under this rule:
+metadata$`Proteome` = ifelse(metadata$BAL_Protein_Cluster %in% c('Olink cluster 1',	'Olink cluster 2'), 'Available', 'Unavailable')
+
+
+metadata.stage <- metadata %>%
+  select(Stage, daysSinceSymptomOnset) %>%
+  mutate(daysSinceSymptomOnset = as.numeric(daysSinceSymptomOnset)) %>%
+  group_by(Stage) %>%
+  summarise(
+    sample_count = n(),
+    daysSinceSymptomOnset_median = median(daysSinceSymptomOnset, na.rm = TRUE),
+    daysSinceSymptomOnset_q25 = quantile(daysSinceSymptomOnset, 0.25, na.rm = TRUE),
+    daysSinceSymptomOnset_q75 = quantile(daysSinceSymptomOnset, 0.75, na.rm = TRUE),
+    daysSinceSymptomOnset_range_min = min(daysSinceSymptomOnset,na.rm = TRUE),
+    daysSinceSymptomOnset_range_max = max(daysSinceSymptomOnset,na.rm = TRUE),
+    .groups = "drop"
+  )
+
+metadata.stage.age.summary <- metadata %>%
+  select(Stage, age) %>%
+  mutate(age = as.numeric(age)) %>%
+  group_by(Stage) %>%
+  summarise(
+    sample_count = n(),
+    age_median = median(age, na.rm = TRUE),
+    age_q25 = quantile(age, 0.25, na.rm = TRUE),
+    age_q75 = quantile(age, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+metadata.patient <- metadata %>%
+  filter(specimen_type == 'BAL') %>%
+  select(ID, age, gender, race,vaccination,Omicron,disease_severity, treatment) %>%
+  mutate(age = as.numeric(age)) %>%
+  unique
+
+```
+### Patient host-specific clinical variable summary
+
+```{r acute sum}
+
+table(metadata.patient$disease_severity)
+
+table(metadata.patient$Omicron)
+
+table(metadata.patient$vaccination)
+
+table(metadata.patient$treatment)
+```
+
+
+```{r hc summary}
+metadata.HC <- metadata %>%
+  filter(specimen_type == 'BAL-HC') %>%
+  select(ID, age, gender, race) %>%
+  mutate(age = as.numeric(age)) 
+
+cat('\n\n')
+cat(sprintf(
+  "Healthy volunteers age summary:\n  Median = %.1f\n  Mean = %.1f\n  SD = %.1f\n  IQR = %.1f–%.1f\n  Range = %d–%d\n",
+  median(metadata.HC$age, na.rm = TRUE),
+  mean(metadata.HC$age, na.rm = TRUE),
+  sd(metadata.HC$age, na.rm = TRUE),
+  quantile(metadata.HC$age, 0.25, na.rm = TRUE),
+  quantile(metadata.HC$age, 0.75, na.rm = TRUE),
+  min(metadata.HC$age, na.rm = TRUE),
+  max(metadata.HC$age, na.rm = TRUE)
+))
+cat('\n\n')
+
+cat('\n\n')
+cat('HC gender')
+cat('\n')
+table(metadata.HC$gender)
+```
+```{r stage pairs}
+patientPairs <- allAnalysis.df %>%
+  filter(Stage != 'Healthy Volunteers' ) %>%
+  mutate(Stage = factor(Stage,levels = Stages.vec)) %>%
+  group_by(ID) %>%
+  arrange(Stage) %>%
+  summarise(
+    Stage_new_combination      = paste(unique(Stage), collapse = " | "),
+    daysSinceSymptomOnset_combination = paste(daysSinceSymptomOnset, collapse = " | "),
+    Stage_new_pairs            = n_distinct(Stage),
+    .groups = "drop"
+  )
+
+patientPairs.count <- patientPairs %>%
+  group_by(Stage_new_combination) %>%
+  summarise(Number_of_combination = n())
+
+create_dt(patientPairs,'Stage-paris per patient')
+create_dt(patientPairs.count,'Stage-paris counts')
+```
+
+```{r write metadata summary to xlsx}
+# write.csv(metadata,file.path(outdir,'metadata_rarefied.csv'))
+# metadata.stage %>% write.csv(file.path(outdir,'stage_nsample_median_quantiles_rarefied.csv'))
+# metadata.stage.age.summary %>% write.csv(file.path(outdir,'stage_age_nsample_median_quantiles_rarefied.csv'))
+# metadata.patient %>% write.csv(file.path(outdir,'patient_info_rarefied.csv'))
+# metadata.HC %>% write.csv(file.path(outdir,'HealthyControl_info_rarefied.csv'))
+# Create workbook
+wb <- createWorkbook()
+
+# 1) Metadata (full)
+addWorksheet(wb, "metadata")
+writeData(wb, "metadata", metadata)
+
+# 2) Stage summary
+addWorksheet(wb, "stage_summary")
+writeData(wb, "stage_summary", metadata.stage)
+
+# 3) Stage + age summary
+addWorksheet(wb, "stage_age_summary")
+writeData(wb, "stage_age_summary", metadata.stage.age.summary)
+
+# 4) Patient info
+addWorksheet(wb, "patient_info")
+writeData(wb, "patient_info", metadata.patient)
+
+# 5) HC info
+addWorksheet(wb, "HealthyVolunteer_info")
+writeData(wb, "HealthyVolunteer_info", metadata.HC)
+
+# Save workbook
+saveWorkbook(
+  wb,
+  file.path(outdir, "metadata.rarefied.summary.xlsx"),
+  overwrite = TRUE
+)
+
+```
+
+
+# Heatmap (Samples either with a ddPCR value or passed rarefaction)
+
+Those are the BAL samples (i.e., excluding HC, as we don't show them in the dataset heatmap) we have included at least in one analysis (diversity and/or bacterial load).
+
+```{r patient meta2, fig.width=12, fig.height=4}
+
+# Step 1
+m.p <- allAnalysis.df %>%
+  filter(Stage != 'Healthy Volunteers') %>%
+  distinct(ID, Stage,sample.id.new,rarefaction,ddpcr_available) %>%
+  mutate(value = case_when(rarefaction == 'passed' & ddpcr_available == 'available' ~ 'ddPCR + 16S rRNA',
+                           rarefaction == 'passed' & ddpcr_available == 'missing' ~ '16S rRNA-Only',
+                           rarefaction == 'failed' & ddpcr_available == 'available' ~ 'ddPCR-Only',
+                           TRUE ~ 'Not available')) %>%
+  select(-c(sample.id.new,rarefaction,ddpcr_available)) %>% 
+  unique()
+
+# Make wide matrix: rows = Stage, columns = ID
+mat <- m.p %>%
+  pivot_wider(names_from = ID, values_from = value, values_fill = 'Not available') %>% # values_fill = Not available: fill missing combination with "Not available"
+  tibble::column_to_rownames('Stage') %>%
+  as.matrix()
+
+# Convert matrix to long format to analyze per patient (column)
+long_df <- as.data.frame(as.table(mat))
+colnames(long_df) <- c("Stage", "ID", "value")
+
+# For each ID, create a character vector of their stages
+id_stage_combo <- long_df %>%
+  filter(value != 'Not available') %>%
+  mutate(Stage = factor(Stage,levels = Stages.vec)) %>%
+  group_by(ID) %>%
+  summarise(stage_combo = paste(sort(Stage), collapse = ",")) %>%
+  ungroup()
+
+
+# Define group order manually
+group_priority <- c(
+  "Acute,Recovery,Convalescent,Extended",
+  "Acute,Recovery,Convalescent",
+  "Recovery,Convalescent,Extended",
+  "Acute,Recovery",
+  "Recovery,Convalescent",
+  "Acute,Convalescent",
+  "Convalescent,Extended",
+  "Acute",
+  "Recovery",
+  "Convalescent"
+)
+
+# Assign group number
+id_stage_combo$group <- match(id_stage_combo$stage_combo, group_priority)
+
+# Reorder IDs accordingly
+ordered_IDs <- id_stage_combo %>%
+  arrange(group) %>%
+  pull(ID)
+
+# Reorder columns of matrix
+desired_stage_order <- Stages.vec
+
+mat_ordered <- mat[desired_stage_order, ordered_IDs]
+
+Heatmap(mat_ordered,
+        name = "Sample",
+        col = c("Not available" = "white","ddPCR-Only" = 'lightgreen', "16S rRNA-Only" = "orange", "ddPCR + 16S rRNA" = "lightblue"),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        column_title = "Patient",
+        row_title = "",
+        show_column_names = F,
+        show_row_names = T
+        )
+
+
+# Clean and prepare annotation metadata
+col_anno_df <- allAnalysis.df %>%
+  filter(Stage != 'Healthy Volunteers') %>%
+  distinct(ID, .keep_all = TRUE) %>%
+  select(ID, vaccination, disease_severity, treatment, Omicron,BAL_Protein_Cluster) %>%
+  mutate(
+    Variant = Omicron,
+    Proteome = ifelse(BAL_Protein_Cluster == 'Not included', 'Unavailable', 'Available')
+  ) %>%
+  filter(ID %in% colnames(mat_ordered)) %>%
+  arrange(factor(ID, levels = colnames(mat_ordered)))
+
+# sanity check for Proteome column
+t.col <- col_anno_df %>% filter(Proteome == 'Available') %>% pull(ID)
+t.meta <-metadata %>% filter(BAL_Protein_Cluster %in% c('Olink cluster 1', 'Olink cluster 2')) %>% pull(ID)
+stopifnot(setequal(t.col,t.meta))
+
+# sanity check for other columns selected (results: each ID only has one status for these selected columns.)
+for (i in c('ID', 'vaccination', 'disease_severity', 'treatment', 'Omicron')) {
+  stopifnot(length(unique(metadata$ID)) == length(unique(paste0(metadata[['ID']],metadata[[i]]))))
+}
+# check order
+stopifnot(all(col_anno_df$ID == colnames(mat_ordered)))
+
+top_anno <- HeatmapAnnotation(
+  Vaccination = col_anno_df$vaccination,
+  Severity    = col_anno_df$disease_severity,
+  Treatment   = col_anno_df$treatment,
+  Variant     = col_anno_df$Variant,
+  `Proteome (acute)`    = col_anno_df$Proteome,
+  col = list(
+    Vaccination = colorscheme_vaccination,
+    Severity    = colorscheme_severity,
+    Treatment   = colorscheme_treatment,
+    Variant     = colorscheme_omicron,
+    `Proteome (acute)`    = colorscheme_proteome
+  ),
+  annotation_name_side = "right",
+  show_annotation_name = TRUE,
+  annotation_name_gp = gpar(fontsize = 10) 
+)
+
+(hm = Heatmap(mat_ordered,
+        name = "Sample",
+        col <- c("ddPCR + 16S rRNA"="#7BA4D9","16S rRNA-Only"="#EDB183","ddPCR-Only"="#8FBC8F","Not available"="#C8C8C8"),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        column_title = "Patient",
+        row_title = "",
+        show_column_names = FALSE,
+        show_row_names = TRUE,
+        row_names_gp = gpar(fontsize = 10),
+        top_annotation = top_anno,
+        border = "black",
+       cell_fun = function(j, i, x, y, width, height, fill) {
+         grid.rect(x = x, y = y, width = width, height = height,
+                   gp = gpar(col = "black", fill = NA, lwd = 0.5))
+         }))
+
+
+saveplot(hm, 'heatmap.metadata.attributes.allSpecimens_ddpcr_or_rarefaction', w = 12, h = 3)
+```

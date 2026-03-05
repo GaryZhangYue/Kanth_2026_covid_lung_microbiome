@@ -1,0 +1,227 @@
+---
+title: "Formal analysis -- 2.a Contamination check"
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+## initiate ---------------------------------------------------------
+packages_to_load = c('ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel','purrr','dplyr','dendextend','lmerTest','Maaslin2',
+                     'performance', 'ComplexHeatmap','circlize','forcats','ggalluvial')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions and image,eval=TRUE}
+outdir = "../data/Results_publication_ready"
+p.all = readRDS(file.path(outdir,'phyloseqObj.all_samples.deduplicated.unrarefied.rds'))
+
+source('utils_functions.R')
+source('auxiliaries.R')
+```
+
+# What are the read count comparing water blanks to samples
+
+```{r blank read count ,fig.height=6, fig.width=8}
+
+metatable = as.data.frame(as.matrix(sample_data(p.all)))
+metatable$read_count_raw = as.numeric(metatable$read_count_raw)
+
+metatable <- metatable %>%
+  mutate(
+    specimen_type = case_when(
+      specimen_type %in% c("water","iso","AE","blank") ~ "Blanks",
+      specimen_type == "mock"                         ~ "Mock community",
+      specimen_type %in% c("BAL-HC","BAL")             ~ "BAL specimens",
+      TRUE                                             ~ specimen_type
+    ),
+    specimen_type = factor(
+      specimen_type,
+      levels = c("BAL specimens", "Mock community", "Blanks"),
+      labels = c("specimen", "mock community", "blank")
+    )
+  )
+
+
+ggviolin(metatable, 
+         x = "specimen_type", 
+         y = "read_count_raw", 
+         fill = "specimen_type",       
+         palette = "jco",               
+         add = "boxplot",              
+         add.params = list(fill = "white", width = 0.2),
+         trim = FALSE) +                # don't trim tails
+  scale_y_log10(
+    breaks = 10^seq(0, 7, by = 2),
+    labels = trans_format("log10", math_format(10^.x))
+  ) +                   
+  labs(x = " ", y = "Read Count (log10)", 
+       title = " ") +
+  theme_pubr(base_size = 14) +    
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        legend.position = "none") +
+  geom_hline(yintercept = 1000, linetype = "dashed", color = "darkred", linewidth = 0.8) 
+
+ ggsave(file.path(outdir,'violinPlot.readCount.specimen_and_blanks.pdf'),width = 6,height = 6)
+
+create_dt(summarize_grouped_stats(metatable,'specimen_type','read_count_raw'),
+          'Read count summary')
+```
+
+## How many blanks do we have
+
+
+```{r blanks sample count}
+table(metatable$specimen_control)
+
+```
+
+## What are the top genera in blanks
+
+Here we look for the top genera (in terms of average relative abundance) in blanks and in specimen from the unrarefied data.
+
+The result suggests that Escherichia/Shigella, Staphylococcus, Corynebacterium, Anoxybacillus, Enterococcus, and Listeria are very likely to be contaminants.
+
+```{r blank vs sample DA,fig.height=12, fig.width=15}
+psq.tmp = p.all %>% subset_samples(., specimen_control %in% c('specimen','control'))
+
+pheno <- psq.tmp %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame %>% 
+  select(c("sample.id.new","specimen_control", "read_count_raw"))
+
+specimen.id <- pheno %>%
+  filter(specimen_control == 'specimen') %>%
+  pull(sample.id.new)
+blank.id <- pheno %>%
+  filter(specimen_control == 'control') %>%
+  pull(sample.id.new)
+
+exps <- taxReadCount_collapse_top10_from_phyloseq(psq.tmp,'Genus',sample_list = sample_names(psq.tmp))[[1]] %>%
+      as.matrix %>%
+      as.data.frame %>%
+      setrowname 
+exps[] <- lapply(exps, function(x) as.numeric(as.character(x)))
+exps = decostand(exps,method = 'total',MARGIN = 2)
+exps <- exps[!grepl("unclassified", rownames(exps)), ]
+
+exps.specimen.genus.mean.top20 <- exps %>%
+  select(all_of(specimen.id)) %>%
+  transmute(genus_mean = rowMeans(across(everything()))) %>%
+  arrange(desc(genus_mean)) %>%
+  slice_max(order_by = genus_mean, n = 10) %>%
+  tibble::rownames_to_column("genus") %>%
+  mutate(group = 'specimen')
+  
+exps.blank.genus.mean.top20 <- exps %>%
+  select(all_of(blank.id)) %>%
+  transmute(genus_mean = rowMeans(across(everything()))) %>%
+  tibble::rownames_to_column("genus") %>%
+  filter(genus %in% exps.specimen.genus.mean.top20$genus) %>%
+  mutate(group = 'blank')
+
+exps.merged.genus.mean.top20 = bind_rows(exps.specimen.genus.mean.top20,exps.blank.genus.mean.top20)
+exps.merged.genus.mean.top20$group = factor(exps.merged.genus.mean.top20$group, levels = c('specimen','blank'))
+
+# set color palette to match above
+jco <- pal_jco("default")(3)
+pal <- c(specimen = jco[1], blank = jco[3])  # <- blank is the 3rd color
+
+p = ggbarplot(
+  exps.merged.genus.mean.top20,
+  x = "genus",
+  y = "genus_mean",
+  facet.by = 'group', ncol = 1, 
+  fill = 'group',
+  palette = pal,
+  color = "group",
+  sort.val = "none",                  # <- don't let ggbarplot reorder
+  order = exps.specimen.genus.mean.top20$genus,                # <- our explicit order
+  x.text.angle = 45,       # Optional: tilt x-axis labels,
+  title = ' ',
+  xlab = '',
+  ylab = 'Relative abundance',
+  legend = "none" 
+)
+p <- ggpar(
+  p,
+  font.title       = c(22, "bold"),
+  font.subtitle    = c(18),
+  font.x           = c(18, "bold"),
+  font.y           = c(18, "bold"),
+  font.xtickslab   = c(16, "bold"),
+  font.ytickslab   = c(16, "bold"),
+  font.legend      = c(16),
+  font.legend.title= c(16, "bold")
+)
+
+# Bigger facet strip labels too
+p + theme(strip.text = element_text(size = 18, face = "bold"))
+ggsave(file.path(outdir,'barplot.top10Genera.specimensAndBlanks.pdf'),width = 6,height = 12)
+```
+
+```{r scatters,fig.height=12, fig.width=15}
+
+# scatter plots for relative abundance of top 20 genera in blanks vs read counts
+exps.blank.genus.mean.top20 <- exps %>%
+  select(all_of(blank.id)) %>%
+  transmute(genus_mean = rowMeans(across(everything()))) %>%
+  arrange(desc(genus_mean)) %>%
+  slice_max(order_by = genus_mean, n = 20) %>%
+  tibble::rownames_to_column("genus") 
+exps.blankTop20 <- exps %>% 
+  subset(., rownames(.) %in% exps.blank.genus.mean.top20$genus) %>%
+  as.matrix %>%
+  t %>%
+  as.data.frame %>%
+  merge(pheno,.,by = 0)
+
+exps.blankTop20.long <- exps.blankTop20 %>%
+  pivot_longer(cols = 5:24, names_to = "genus", values_to = "relative_abundance") %>%
+  mutate(read_count_raw_log10 = log10(as.numeric(read_count_raw)),
+         genus = factor(genus,levels = exps.blank.genus.mean.top20$genus)) 
+
+ggscatter(x = 'read_count_raw_log10',
+          y = 'relative_abundance',
+          color = 'read_count_raw_log10',
+          data = exps.blankTop20.long,
+          facet.by = 'genus',
+          title = '',
+          xlab = 'log10(Read count)',
+          ylab = 'Relative abundance') + 
+  scale_color_gradient(low = "grey", high = "darkred") +
+  labs(color = "log10(Read count)") +
+  theme(axis.title = element_text(size = 16, face = "bold"))
+ggsave(file.path(outdir,'scatterplot.abundanceVSreadcount.top20blankGenera.pdf'),width = 12,height = 12)
+
+```
+

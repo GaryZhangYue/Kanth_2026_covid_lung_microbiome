@@ -1,0 +1,285 @@
+---
+title: "Formal analysis -- 1. Rarefaction analysis"
+subtitle: ""
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+## initiate ---------------------------------------------------------
+packages_to_load = c('dplyr','ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions,eval=TRUE}
+source('utils_functions.R')
+```
+
+```{r variables}
+indir = "../data/R_input"
+outdir = "../data/Formal_analysis_files"
+
+if (file.exists(outdir)){
+  unlink(outdir,recursive = TRUE)
+  dir.create(outdir)
+} else {
+  dir.create(outdir)
+}
+
+
+```
+
+```{r import}
+metadata.raw = read.csv(file.path(indir,'metadata.unparsed.withHC.txt'),sep = '\t')
+metadata.additional = read.csv(file.path(indir,'FINAL_8.28.24_NIH_BAL_combined_taxa_table.SORTED_COVID.csv'))
+otu.raw = read.csv(file.path(indir,'nih_bal.shared.txt'),sep = '\t')
+tree= read.tree(file.path(indir,'nih_bal_mothur.rep.phylip.tre')) # Dickson's group-generated phylogenetic tree
+taxa.raw = read.csv(file.path(indir,'nih_bal.cons.taxonomy.txt'),sep = '\t')
+```
+
+
+```{r parse}
+# metadata -----------
+metadata.raw = merge(metadata.raw,
+                     select(metadata.additional, c(uniqID, ID, Date, Stage)),
+                     by = 'uniqID',all.x = T)
+
+## remove the duplicate measurements of two controls (specimen_BAL_09e6hL and 03C; their counter parts have a higher number of reads, which are kept)
+metadata.raw = subset(metadata.raw,!uniqID %in% c('09e6hL','03C'))
+## set a consistent rowname to avoid confusions downstream
+metadata.raw$sample.id.new = paste0('s',seq_len(nrow(metadata.raw)))
+rownames(metadata.raw) <- metadata.raw$sample.id.new
+sample_table = sample_data(metadata.raw) # this leads to automatic renaming the samples, so we have to rename the feature table correspondingly
+metadata = as.data.frame(as.matrix(sample_table))
+```
+
+
+```{r otu phylotree taxa parsing}
+# OTU table --------
+names(otu.raw)[1] <- 'sample.id'
+# sanity check 
+otu = subset(otu.raw, sample.id %in% metadata$sample.id)
+stopifnot(length(intersect(metadata$sample.id, otu$sample.id)) == nrow(metadata))
+otu <- setrowname(otu)
+
+otu <- otu %>%
+  as.matrix %>%
+  t 
+
+colnames(otu) = rownames(sample_table)[match(colnames(otu),sample_table$sample.id)]
+otu= otu[,rownames(sample_table)]
+feature_table = otu_table(as.matrix(otu),taxa_are_rows = T)
+
+# phylogenetic tree -----------
+# Dickson group generated the tree
+# remove long sufix in tree tip labels
+tree$tip.label = sub('_.*','',tree$tip.label)
+
+# taxa table ------------
+taxa <- taxa.raw %>% 
+  separate(Taxonomy, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep = ';') %>%
+  mutate_all(~ ifelse(. == "", "Unclassified", .)) %>%               # Replacing empty cells
+  mutate_all(~ gsub("\\s*\\(.*?\\)", "", .))                  # Removing everything in parentheses
+  #mutate_all(~ ifelse(grepl("unclassified", ., ignore.case = TRUE), "Unclassified", .)) # Ensuring "unclassified" is replaced
+
+rownames(taxa) = taxa$OTU
+taxa = taxa[,-c(1:2)]
+taxa_table = tax_table(as.matrix(taxa))
+
+# construct phyloseq objects -------------------
+p.all = phyloseq(feature_table,tree,taxa_table,sample_table)
+```
+
+# Remove a few duplicated samples
+
+```{r count reads}
+p.all = count_total_reads(p.all,'raw')
+metatable = as.data.frame(as.matrix(sample_data(p.all)))
+metatable$read_count_raw = as.numeric(metatable$read_count_raw)
+ggboxplot(metatable,x='specimen_type',y='read_count_raw')+
+  scale_y_log10()
+```
+
+There are three duplicated samples: ID=189 at stage R, ID=117 at stage C, and ID=223 at stage A. sample of 117_C (s153) with 3 reads is removed here (it will be removed during rarefaction anyway). For the other two pairs, we merge them by adding OTU read count up.
+
+```{r dedup}
+sample_data(p.all)[['ID_Stage']] = paste0(sample_data(p.all)[['ID']],'_',sample_data(p.all)[['Stage']])
+metatable = as.data.frame(as.matrix(sample_data(p.all)))
+
+dc = as.data.frame(table(metatable$ID_Stage))
+dc = subset(dc,Freq>1 & Var1 != 'NA_NA')
+metatable = subset(metatable, ID_Stage %in% dc$Var1, select = c(ID_Stage,read_count_raw,sample.id.new))
+create_dt(metatable, "Duplicates")
+
+# separate the non-redundant samples with the duplicated ones (keep s154)
+p.all.temp = prune_samples(c(setdiff(sample_names(p.all),metatable$sample.id.new),"s154"),p.all)
+
+p.all.189R = merge_duplicates(rownames(subset(metatable,ID_Stage == '189_R')),p.all)
+p.all.223A = merge_duplicates(rownames(subset(metatable,ID_Stage == '223_A')),p.all)
+
+p.all.dedup = merge_phyloseq(p.all.189R,p.all.223A)
+sample_data(p.all.dedup)$sample.id.new = rownames(sample_data(p.all.dedup))
+metatable = as.data.frame(as.matrix(sample_data(p.all.dedup)))
+p.all = merge_phyloseq(p.all.temp,p.all.dedup)
+metatable = as.data.frame(as.matrix(sample_data(p.all)))
+
+```
+
+
+
+```{r save p all}
+saveRDS(p.all,file = file.path(outdir,'phyloseqObj.all_samples.deduplicated.unrarefied.rds'))
+```
+
+# Rarefaction
+
+## Sample counts in the potential range of rarefaction depths (1000-5000)
+
+
+```{r sample combination count}
+# select samples
+p.1 = subset_samples(p.all,specimen_control == 'specimen')
+metatable <- p.1 %>%
+  sample_data %>%
+    as.matrix %>%
+    as.data.frame
+metatable$read_count_raw = as.numeric(metatable$read_count_raw)
+```
+
+```{r rr sample count}
+res.all = NULL
+for (depth in c(5000,4000,3000,2000,1000,500,0)){
+  print(depth)
+  df = subset(metatable,read_count_raw>depth)
+  res = calculate_stage_combinations(df,depth)
+  #print(res)
+  if (!is.null(res.all)){
+    res.all = merge(res,res.all,by = 'Stage_Combination',all=T)
+  } else {res.all = res}
+}
+
+create_dt(res.all,'Sample counts at different rarefaction depth')
+
+```
+
+## Manual rarefaction
+
+```{r rarefy, fig.width=16,fig.height=14,eval=TRUE}
+
+p.1 = count_total_reads(p.1,'before_rarefaction')
+create_dt(as.data.frame(sample_data(p.1)),'Metadata')
+
+
+# Define rarefaction depths and calculate alpha diversity metrics
+depths <- seq(500, 20000, by = 200)
+
+rarefying_list <- lapply(depths, function(d) {
+  richness <- p.1 %>%
+    rarefy_even_depth(., sample.size = d, rngseed = T, replace = F, trimOTUs = TRUE, verbose = F) %>%
+    estimate_richness %>%
+    select(c(Observed,Chao1,Shannon,InvSimpson)) %>%
+    mutate(Rarefying_depth = d,
+           Sample.id = rownames(.))
+  #print(paste0('rarefying finished at depth ',d))
+  return(richness)
+  })
+# merge list to a overarching dataframe
+rarefaction = bind_rows(rarefying_list)
+saveRDS(rarefaction,file.path(outdir,'rarefaction.RDS'))
+```
+
+```{r manual rarefy plot,fig.width=20,fig.height=14,eval=FALSE}
+# Plot
+#rarefaction_long = readRDS(file.path(outdir,'rarefaction.RDS'))
+# Reshape the data from wide to long format
+rarefaction_long <- rarefaction %>%
+  pivot_longer(cols = c(Observed, Chao1, Shannon, InvSimpson), # Columns to stack
+               names_to = "Metric",                           # New column for metric names
+               values_to = "Value")     
+p1 = ggplot(rarefaction_long, aes(x = Rarefying_depth, y = Value, color = Sample.id)) +
+  geom_line() +
+  labs(title = "Manual Rarefaction Curve", x = "Sampling Depth", y = "Metric Value") +
+  theme(legend.position = "none") +
+  facet_wrap(~ Metric, scales = "free_y")
+ggplotly(p1)
+
+```
+
+```{r rarefy plots2}
+rar.sha = ggplot(rarefaction, aes(x = Rarefying_depth, y = Shannon, color = Sample.id)) +
+  geom_line() +
+  labs(title = "Manual Rarefaction Curve -- Shannon Index", x = "Sampling Depth", y = "Shannon Index") +
+  theme(legend.position = "none") 
+rar.obs = ggplot(rarefaction, aes(x = Rarefying_depth, y = Observed, color = Sample.id)) +
+  geom_line() +
+  labs(title = "Manual Rarefaction Curve -- Observed OTUs", x = "Sampling Depth", y = "Observed OTUs") +
+  theme(legend.position = "none") 
+rar.InS = ggplot(rarefaction, aes(x = Rarefying_depth, y = InvSimpson, color = Sample.id)) +
+  geom_line() +
+  labs(title = "Manual Rarefaction Curve -- InvSimpson", x = "Sampling Depth", y = "InvSimpson") +
+  theme(legend.position = "none") 
+
+ggplotly(rar.obs)
+ggplotly(rar.sha)
+ggplotly(rar.InS)
+```
+
+
+
+## ggrare automatic rarefaction for benchmarking
+
+```{r ggrare,results='hide'}
+p = ggrare(p.1, step = 200, color = 'Stage', label = NULL, se = TRUE)
+```
+
+### Interactive plots
+
+```{r ggrare plot,results='asis'}
+cat('\n\n')
+cat('#### ggrare full rarefaction curves')
+cat('\n\n')
+ggplotly(p)
+cat('\n\n')
+cat('#### ggrare rarefaction curves capped at 10,000 on Xaxis')
+cat('\n\n')
+p1 = p + xlim(0,10000)
+ggplotly(p1)
+```
+
+# Session information and R image
+
+```{r session info,eval=T}
+sessionInfo()
+save.image(file = file.path(outdir,"1.Rarefaction_analysis.RData"))
+saveRDS(p.1,file = file.path(outdir,'phyloseqObj.specimen.deduplicated.unrarefied.rds'))
+
+```

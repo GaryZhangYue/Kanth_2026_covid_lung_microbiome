@@ -1,0 +1,230 @@
+---
+title: "Formal analysis -- 1.b.Metadata_rarefaction_diversityMetrics_calc"
+subtitle: ""
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+## initiate ---------------------------------------------------------
+packages_to_load = c('dplyr','ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel','lmerTest')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions,eval=TRUE}
+source('utils_functions.R')
+source('auxiliaries.R')
+```
+
+```{r variables}
+indir = "../data/R_input"
+outdir = "../data/Formal_analysis_files2"
+
+# if (file.exists(outdir)){
+#   unlink(outdir,recursive = TRUE)
+#   dir.create(outdir)
+# } else {
+#   dir.create(outdir)
+# }
+
+# phyloseqObj.specimen.deduplicated.unrarefied.rds AND phyloseqObj.all_samples.deduplicated.unrarefied.rds are copied from Formal_analysis_files manually
+p.1 = readRDS(file.path(outdir,'phyloseqObj.specimen.deduplicated.unrarefied.rds'))
+```
+
+# Add phenotype information
+
+__Here we add the demographic information (V2_Demographics_August_2024_amended.csv) into the phyloseq object.__
+
+For disease severity:
+
+4= patients with mild disease/ambulatory ---> converted to normoxic
+
+5, 6, and 7= moderate/severe disease ---> converted to hypoxic
+
+Note that "specimen_BAL_09e6hL", "unknown_unknown_03C", and "specimen_BAL_17e24hL" are not in p.1r. The first two are removed as duplicated measurements from the beginning, and the third one only has about 200 reads so removed after rarefaction.
+
+__Update the omicron status__
+
+Using January 2022 as a cutoff (patients with symptom onset date before this date is pre-omicron).
+
+```{r add metadata 1 }
+metatable <- p.1 %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame %>% 
+  dplyr::select(c('sample.id','ID'))
+
+demo = read.csv(file.path(indir,'V2_Demographics_August_2024_amended.csv'))
+demo$disease_severity = ifelse(demo$Highest.ordinal.scale_Rec <= 4, 'Normoxic', 'Hypoxic')
+
+demo = merge(metatable,demo,by= 'ID')
+demoHC = read.csv(file.path(indir,'Demographics_Microbiome_HC.csv'))
+demo= bind_rows(demo,demoHC)
+
+med = read.csv(file.path(indir,'antibiotic_antiviral.usage.csv'))
+med$ID = as.character(med$ID)
+
+bal.clu <- read.csv('../data/R_input/olinkCluster.csv') %>% select(ID_Stage,BAL_Protein_Cluster)
+
+sample_data(p.1)[['gender']] = demo$GENDER[match(sample_data(p.1)[['sample.id']],demo$sample.id)]
+sample_data(p.1)[['gender']] = paste0('gender_', sample_data(p.1)[['gender']])
+
+sample_data(p.1)[['race']] = demo$Race[match(sample_data(p.1)[['sample.id']],demo$sample.id)]
+sample_data(p.1)[['race']] = paste0('race_',sample_data(p.1)[['race']])
+
+sample_data(p.1)[['age']] = demo$Age[match(sample_data(p.1)[['sample.id']],demo$sample.id)]
+
+sample_data(p.1)[['vaccination']] = demo$Vaccination[match(sample_data(p.1)[['sample.id']],demo$sample.id)]
+sample_data(p.1)[['vaccination']] = ifelse(sample_data(p.1)[['vaccination']] == '0', 'Unvaccinated','Vaccinated')
+
+sample_data(p.1)[['disease_severity']] = demo$disease_severity[match(sample_data(p.1)[['sample.id']],demo$sample.id)]
+
+sample_data(p.1)[['antibiotics_antiviral_usage']] = med$antibiotics_antiviral_usage[match(sample_data(p.1)[['ID']],med$ID)]
+sample_data(p.1)[['antibiotics_antiviral_usage']][is.na(sample_data(p.1)[['antibiotics_antiviral_usage']])] <- 'Not used'
+sample_data(p.1)[['treatment']] = ifelse(sample_data(p.1)[['antibiotics_antiviral_usage']] == 'Not used','Untreated','Treated')
+
+sample_data(p.1)[['BAL_Protein_Cluster']] = bal.clu$BAL_Protein_Cluster[match(sample_data(p.1)[['ID_Stage']],bal.clu$ID_Stage)]
+sample_data(p.1)[['BAL_Protein_Cluster']][is.na(sample_data(p.1)[['BAL_Protein_Cluster']])] <- 'Not included'
+
+
+sample_data(p.1)[['gender']] = as.factor(sample_data(p.1)[['gender']])
+sample_data(p.1)[['race']]  = as.factor(sample_data(p.1)[['race']] )
+sample_data(p.1)[['vaccination']] = as.factor(sample_data(p.1)[['vaccination']])
+sample_data(p.1)[['age']] = as.numeric(sample_data(p.1)[['age']])
+sample_data(p.1)[['disease_severity']] = as.factor(sample_data(p.1)[['disease_severity']])
+sample_data(p.1)[['antibiotics_antiviral_usage']]  = as.factor(sample_data(p.1)[['antibiotics_antiviral_usage']] )
+sample_data(p.1)[['treatment']] = as.factor(sample_data(p.1)[['treatment']])
+```
+
+# Add symptom onset date
+
+Note that Patient 237 has the symptom onset date corrected in the .csv file (corrected to 9/27/21). For Patient 126, Acute date is corrected to 12/4/20 here.
+
+```{r add metadata2}
+# correct date for patient 126
+sample_data(p.1)[['Date']][which(sample_data(p.1)[['ID']] == '126' & sample_data(p.1)[['Stage']] == 'A')] <- '12/4/20'
+
+
+
+metatable <- as.data.frame(as.matrix(sample_data(p.1)))
+meta2 <- read.csv('../data/R_input/V2_Demographics_August_2024_amended.csv') %>% 
+  select(ID,Symptom.onset) %>%
+  merge(.,select(metatable,c(sample.id.new,ID,Stage,Date)),by = 'ID', all.y = T) %>%
+  mutate(
+    Symptomonset.date = as.Date(Symptom.onset, format = "%m/%d/%y"),
+    Measurement.date = as.Date(Date, format = "%m/%d/%y"),
+    daysSinceSymptomOnset <- as.numeric(Measurement.date - Symptomonset.date)
+  )
+
+
+sample_data(p.1)[['Symptomonset.date']] = meta2$Symptomonset.date[match(sample_data(p.1)$sample.id.new,meta2$sample.id.new)]
+sample_data(p.1)[['Measurement.date']] = meta2$Measurement.date[match(sample_data(p.1)$sample.id.new,meta2$sample.id.new)]
+sample_data(p.1)[['daysSinceSymptomOnset']] = meta2$daysSinceSymptomOnset[match(sample_data(p.1)$sample.id.new,meta2$sample.id.new)]
+
+```
+
+# Add Omicron status
+
+```{r add omicron}
+sample_data(p.1)[['Omicron']] <- ifelse(is.na(sample_data(p.1)[['Symptomonset.date']]), NA,
+                                         ifelse(sample_data(p.1)[['Symptomonset.date']]< as.Date("2022-01-01"), "Pre-Omicron", "Omicron"))
+sample_data(p.1)[['Omicron']] = as.factor(sample_data(p.1)[['Omicron']])
+```
+
+# Sample Stage categorization
+
+Acute - Acute within 40 days of symptoms
+
+Recovery - Recovery beyond 40 days to 3 months
+
+Convalescent - Convalescence beyond 3 months to 12 months
+
+Extended - Late convalescence > 12 mo to 24 months
+
+```{r edit stage categorization}
+sample_data(p.1)[['Stage']] = ifelse(is.na(sample_data(p.1)[['Stage']]),'Healthy Volunteers',
+                                     ifelse(sample_data(p.1)[['Stage']] == 'A', 'Acute',
+                                            ifelse(sample_data(p.1)[['Stage']] == 'R', 'Recovery',
+                                                   ifelse(sample_data(p.1)[['Stage']] == 'C', 'Convalescent',
+                                                          ifelse(sample_data(p.1)[['Stage']] == 'C24', 'Extended','NONE')))))
+```
+
+# Final metadata
+
+```{r remove redundant columns}
+# remove redundant columns
+redundant_cols = c('MiSeq_reads','Shannon_Dickson','Max_OTU_Dickson','rarefy_1000_Dickson','Date','read_count_raw')
+
+for (i in redundant_cols){
+  sample_data(p.1)[[i]] <- NULL
+}
+
+```
+
+# Rarefy at 1,000 reads and perform TSS normalization (relative abundance)
+
+```{r rarefy}
+p.1r = rarefy_even_depth(p.1, sample.size = 1000, rngseed = T, replace = F, trimOTUs = TRUE, verbose = F)
+p.1r.absolute <- p.1r
+# TSS normalization (calculate relative abundance)
+p.1r = transform_sample_counts(p.1r, function(x) 100*(x / sum(x))) 
+metatable = as.data.frame(sample_data(p.1r))
+
+p.1r.sampleCount = as.data.frame(table(metatable[['Stage']])) %>% transmute(group = Var1,SampleCount = Freq)
+create_dt(p.1r.sampleCount,'Number of samples in each group after rarefaction at 1000 reads')
+```
+
+# Diversity calculation
+
+```{r diversity calc}
+alpha.div <- p.1r.absolute %>%
+  estimate_richness %>%
+    select(c(Observed,Shannon))
+dist.wUF = UniFrac(p.1r, weighted=T, normalized=TRUE, parallel=F)
+
+```
+
+# Save RDS 
+
+```{r save rds}
+saveRDS(p.1,file.path(outdir,'phyloseqObj.specimen.deduplicated.updatedMetadata.unrarefied.rds'))
+saveRDS(p.1r,file.path(outdir,'phyloseqObj.specimen.deduplicated.updatedMetadata.rarefied.rds'))
+saveRDS(alpha.div,file.path(outdir,'alpha.diversity.rds'))
+saveRDS(dist.wUF,file.path(outdir,'dist.weightedUniFrac.rds'))
+```
+
+# Session Information
+
+
+```{r session info,eval=T}
+sessionInfo()
+save.image(file = file.path(outdir,"1.b.Metadata_rarefaction_diversityMetrics_calc.RData"))

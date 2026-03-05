@@ -1,0 +1,123 @@
+---
+title: "Formal analysis -- 3.a Diversity: Stage comparison"
+subtitle: "Acute vs Healthy Volunteers"
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+## initiate ---------------------------------------------------------
+packages_to_load = c('ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel','purrr','dplyr','dendextend','lmerTest','Maaslin2',
+                     'performance', 'ComplexHeatmap','circlize','forcats','ggalluvial')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions and image,eval=TRUE}
+outdir = "../data/Results_publication_ready"
+p.1r = readRDS(file.path(outdir,'phyloseqObj.specimen.deduplicated.correctedMetadata.rarefied.rds'))
+
+source('utils_functions.R')
+source('auxiliaries.R')
+```
+
+```{r beta div,eval=T}
+dist.wUF = readRDS(file.path(outdir,'dist.weightedUniFrac.RDS'))
+alpha.div = readRDS(file.path(outdir,'alpha.diversity.rds'))
+```
+
+# Beta diversity
+
+```{r beta div plot,eval=T, results='asis'}
+
+## weighted unifrac ---------------
+grp = 'Stage'
+dm = dist.wUF
+metatable <- p.1r %>%
+  sample_data %>%
+  as.matrix %>%
+  as.data.frame %>%
+  filter(Stage %in% c('Acute','Healthy Volunteers'))
+metatable[['Stage']] = factor(metatable[['Stage']],levels = c('Acute', 'Healthy Volunteers'))
+dm_name = 'Weighted UniFrac'
+
+
+plt = plot_unifrac(dm = dm,metatable = metatable, grp = grp,dm_name = dm_name,permtest = T,custom_colors = colorscheme)
+ggsave(filename = file.path(outdir,"PCoA.weightedUF.acute_vs_HC.pdf"), width = 5, height = 5)
+
+perm_test(metatable, dm, stageTest.unpaired[[1]]) 
+
+```
+
+## Fit Genus relative abundance to Weighted UniFrac PCoA
+
+```{r tax envfit}
+
+envfitDf = tax_agg(p.1r)
+topN_envfit_variables_to_plot = 2 # plot top 2 to only show the ones have > 30% R2
+
+env.taxa = plot_envifit(dm = dm,metatable = metatable, 
+                        grp = grp ,dm_name = dm_name, 
+                        envfitDf = envfitDf, topN_envfit_variables_to_plot = topN_envfit_variables_to_plot,
+                        custom_colors = colorscheme,arrowshrinkingby = 0.5)
+
+# print pcoa plot with gg_text_repel as a still image
+print(env.taxa[[1]])
+ggsave(filename = file.path(outdir,"PCoA.envFit.weightedUF.acute_vs_HC.top2fit.pdf"), plot = env.taxa[[1]], width = 5, height = 5)
+create_dt(env.taxa[[4]],'EnvFit')
+```
+
+
+# Alpha diversity
+
+```{r alpha}
+alpha.div.long <- metatable %>%
+  select(ID,Stage) %>%
+  merge(.,alpha.div,by=0,all.x=T) %>%
+  pivot_longer(cols = c('Observed','Shannon'), # Columns to stack
+               names_to = "Metric",                           # New column for metric names
+               values_to = "Value") %>%
+  dplyr::mutate(Stage = factor(Stage,levels = Stages.HC.vec)) %>%
+  dplyr::mutate(Metric = ifelse(Metric == 'Observed', 'Observed OTUs',
+                                ifelse(Metric == 'Shannon', 'Shannon Index','ERROR')))
+alpha.div.long  %>%
+  ggplot(aes(x = Stage, y = Value, fill = Stage)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = colorscheme) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 6) +
+  labs(x = " ", y = "Metric value", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        legend.position = "none")
+ggsave(file.path(outdir,'violinPlot.alpha.Acute_vs_HC.pdf'),width = 4.6,height = 5)
+```

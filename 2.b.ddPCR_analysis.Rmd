@@ -1,0 +1,314 @@
+---
+title: "Formal analysis -- 2.b Bacterial Load Analysis"
+subtitle: "Analysis of stages, treatment, illness severity, vaccination and covid variant effects"
+date: "`r Sys.Date()`"
+author: Yue (Gary) Zhang, PhD
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = T, message = T,echo = T) 
+```
+
+
+```{r Initiate, results='hide'}
+## initiate ---------------------------------------------------------
+packages_to_load = c('ggplot2','vegan','ape','stringr','usedist','ggpubr','corrplot',
+                     'cowplot','GGally','scales','metagMisc','ggsci','rstatix','wesanderson', 'readxl','tidyr',
+                     'phyloseq','DT','plotly','ranacapa','ggrepel','purrr','dplyr','dendextend','lmerTest','Maaslin2',
+                     'performance', 'ComplexHeatmap','circlize','forcats','ggalluvial')
+invisible(suppressPackageStartupMessages({
+    lapply(packages_to_load, library, character.only = TRUE)
+}))
+
+#generating color palettes
+col1 = wes_palette("Rushmore1")
+col2 = wes_palette("GrandBudapest2")
+col3 = wes_palette('Darjeeling2')
+col21 <- rev(c("tomato1","darkblue","turquoise1","lightblue","darkred","mediumblue","purple","bisque",
+               "greenyellow","yellow","violetred2","darkgreen","darkgoldenrod1","deeppink3","cadetblue4",
+               "orchid2","seagreen3","purple4","dodgerblue2","red","gray27"))
+
+set.seed(666)
+```
+
+```{r functions and image,eval=TRUE}
+outdir = "../data/Results_publication_ready"
+ddpcr.p.1 = readRDS(file.path(outdir,'ddpcr_preprocessed.rds'))
+source('utils_functions.R')
+source('auxiliaries.R')
+```
+
+__ddPCR analysis includes all samples having ddpcr measurements, regardless of rarefaction. The samples without ddpcr values are excluded.__
+
+
+# Redundant sample removal
+
+There are redundant samples in recovery phase (samples generated from the same patient in two time points in the recovery stage). For those duplicates, we remove the ones from the pairs that are from an earlier dates (with a smaller days since symptom unset)
+
+```{r remove redundant samples}
+ddpcr.p.1.dedup <- ddpcr.p.1 %>%
+  filter(Stage != 'Healthy Volunteers') %>%
+  group_by(ID, Stage) %>%
+  slice_max(daysSinceSymptomOnset, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  bind_rows(.,
+            ddpcr.p.1 %>%
+              filter(Stage == 'Healthy Volunteers'))
+
+ddpcr.p.1.removed <- ddpcr.p.1 %>%
+  filter(!(sample.id.new %in% ddpcr.p.1.dedup$sample.id.new)) %>%
+  select(c(sample.id.new,ID,Stage,daysSinceSymptomOnset))
+
+ddpcr.p.1.Kept <- ddpcr.p.1.dedup %>%
+  filter(ID %in% ddpcr.p.1.removed$ID & Stage == 'Recovery') %>%
+  select(c(sample.id.new,ID,Stage,daysSinceSymptomOnset))
+
+create_dt(ddpcr.p.1.removed,'samples from duplicates that are removed')
+create_dt(ddpcr.p.1.Kept,'samples from duplicates that are kept')
+
+ddpcr.p.1 <- ddpcr.p.1.dedup
+
+saveRDS(ddpcr.p.1.removed,file.path(outdir,'duplicate_recovery_samples_to_remove.RDS'))
+```
+
+
+# Compare Acute against HC
+
+```{r acute vs hc}
+
+ddpcr.p.1 %>%
+  filter(Stage %in% c('Acute','Healthy Volunteers')) %>% 
+  ggplot(aes(x = Stage, y = ddPCR_log10, fill = Stage)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  scale_fill_manual(values = colorscheme) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "16S rRNA gene copies in BALF \n log10(copies/mL)", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    legend.position = "none"
+  )
+ggsave(file.path(outdir,'violinPlot.ddpcr.Acute_vs_HC.pdf'),width = 3,height = 6)
+
+```
+
+
+# Compare all stages against HC
+
+```{r stages vs hc}
+
+ddpcr.p.1 %>%
+  ggplot(aes(x = Stage, y = ddPCR_log10, fill = Stage)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  scale_fill_manual(values = colorscheme) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = stageTest.unpaired,
+    label = "p.signif",
+    color = "darkred",
+    size = 6
+  ) +
+  labs(x = " ", y = "16S rRNA gene copies in BALF \n log10(copies/mL)", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1,size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title.y = element_text(size = 20),
+    legend.position = "none"
+  )
+ggsave(file.path(outdir,'violinPlot.ddpcr.AllStages_vs_HC.pdf'),width = 6,height = 6)
+
+ ddpcr.stat <- compare_means(
+  ddPCR_log10 ~ Stage, 
+  data = ddpcr.p.1, 
+  method = "wilcox.test", 
+  comparisons = stageTest.unpaired) %>% 
+  filter(group2 == 'Healthy Volunteers')  %>%
+  select(-c(p.adj,p.format,p.signif))
+
+create_dt(ddpcr.stat,'Statistics')
+
+
+ddpcr.p.1 %>%
+  group_by(Stage) %>%
+  summarise(
+    n = n(),
+    median = median(ddPCR_log10, na.rm = TRUE),
+    Q1 = quantile(ddPCR_log10, 0.25, na.rm = TRUE),
+    Q3 = quantile(ddPCR_log10, 0.75, na.rm = TRUE),
+    IQR = IQR(ddPCR_log10, na.rm = TRUE)
+  ) %>%
+  create_dt(.,'Summary statistics')
+
+```
+
+# Viral & Host-specific clinical phenotypes
+
+Analysis is limited to Acute-only for pre-omicron vs omicron, and Acute-only & Pre-omicron-only for the effects of treatment, disease severity, and vaccination.
+
+```{r ddpcr selection}
+ddpcr.df.Acute <- ddpcr.p.1 %>%
+  subset(Stage == 'Acute')
+
+ddpcr.df.preomAcute <- ddpcr.p.1 %>%
+  subset(Omicron == 'Pre-Omicron' & Stage == 'Acute')
+
+```
+
+## Treated vs Untreated in Acute samples in pre-Omicron
+
+```{r treatment}
+grp <- 'treatment'
+colorscheme.tmp <-colorscheme_treatment
+ddpcr.df.tmp <- ddpcr.df.preomAcute
+
+ddpcr.df.tmp %>%
+  ggplot(aes(x = get(grp), y = ddPCR_log10, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  scale_fill_manual(values = colorscheme.tmp) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "16S rRNA gene copies in BALF \n log10(copies/mL)", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    legend.position = "none"
+  )
+ggsave(file.path(outdir,'violinPlot.ddpcr.treatment.acuteOnly.preomicronOnly.pdf'),width = 3,height = 6)
+
+ddpcr.df.tmp %>%
+  group_by(!!sym(grp)) %>%
+  summarise(
+    n = n(),
+    median = median(ddPCR_log10, na.rm = TRUE),
+    Q1 = quantile(ddPCR_log10, 0.25, na.rm = TRUE),
+    Q3 = quantile(ddPCR_log10, 0.75, na.rm = TRUE),
+    IQR = IQR(ddPCR_log10, na.rm = TRUE)
+  ) %>%
+  create_dt(.,'Summary statistics')
+```
+
+# Disease severity effects in Acute samples in Preomicron
+
+```{r disease severity preom, results='asis',fig.height=8,fig.width=10,eval=TRUE}
+grp <- 'disease_severity'
+colorscheme.tmp <-colorscheme_severity
+ddpcr.df.tmp <- ddpcr.df.preomAcute
+
+
+ddpcr.df.tmp %>%
+  ggplot(aes(x = get(grp), y = ddPCR_log10, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  scale_fill_manual(values = colorscheme.tmp) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "16S rRNA gene copies in BALF \n log10(copies/mL)", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    legend.position = "none"
+  )
+ggsave(file.path(outdir,'violinPlot.ddpcr.severity.acuteOnly.preomicronOnly.pdf'),width = 3,height = 6)
+
+
+ddpcr.df.tmp %>%
+  group_by(!!sym(grp)) %>%
+  summarise(
+    n = n(),
+    median = median(ddPCR_log10, na.rm = TRUE),
+    Q1 = quantile(ddPCR_log10, 0.25, na.rm = TRUE),
+    Q3 = quantile(ddPCR_log10, 0.75, na.rm = TRUE),
+    IQR = IQR(ddPCR_log10, na.rm = TRUE)
+  ) %>%
+  create_dt(.,'Summary statistics')
+```
+
+# Vaccination effects in Acute and Preomicron
+
+```{r vax, fig.height = 8, fig.width=10}
+grp <- 'vaccination'
+colorscheme.tmp <- colorscheme_vaccination
+ddpcr.df.tmp <- ddpcr.df.preomAcute
+
+
+ddpcr.df.tmp %>%
+  ggplot(aes(x = get(grp), y = ddPCR_log10, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  scale_fill_manual(values = colorscheme.tmp) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "16S rRNA gene copies in BALF \n log10(copies/mL)", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    legend.position = "none"
+  )
+ggsave(file.path(outdir,'violinPlot.ddpcr.vaccination.acuteOnly.preomicronOnly.pdf'),width = 3,height = 6)
+
+ddpcr.df.tmp %>%
+  group_by(!!sym(grp)) %>%
+  summarise(
+    n = n(),
+    median = median(ddPCR_log10, na.rm = TRUE),
+    Q1 = quantile(ddPCR_log10, 0.25, na.rm = TRUE),
+    Q3 = quantile(ddPCR_log10, 0.75, na.rm = TRUE),
+    IQR = IQR(ddPCR_log10, na.rm = TRUE)
+  ) %>%
+  create_dt(.,'Summary statistics')
+```
+
+
+# Omicron VS Preomicron effects in Acute samples
+
+```{r om, fig.height = 8, fig.width=10}
+grp <- 'Omicron'
+colorscheme.tmp <- colorscheme_omicron
+ddpcr.df.tmp <- ddpcr.df.Acute
+
+
+ddpcr.df.tmp %>%
+  ggplot(aes(x = get(grp), y = ddPCR_log10, fill = get(grp))) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.2, fill = "white", outlier.size = 0.5) +
+  scale_fill_manual(values = colorscheme.tmp) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x.npc = "middle", label.y.npc = 'top',color='darkred',size = 10) +
+  labs(x = " ", y = "16S rRNA gene copies in BALF \n log10(copies/mL)", title = " ") +
+  theme_pubr(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    legend.position = "none"
+  )
+
+ggsave(file.path(outdir,'violinPlot.ddpcr.omicron.acuteOnly.pdf'),width = 3,height = 6)
+
+
+ddpcr.df.tmp %>%
+  group_by(!!sym(grp)) %>%
+  summarise(
+    n = n(),
+    median = median(ddPCR_log10, na.rm = TRUE),
+    Q1 = quantile(ddPCR_log10, 0.25, na.rm = TRUE),
+    Q3 = quantile(ddPCR_log10, 0.75, na.rm = TRUE),
+    IQR = IQR(ddPCR_log10, na.rm = TRUE)
+  ) %>%
+  create_dt(.,'Summary statistics')
+```
+
+# Session Info
+
+```{r sess}
+sessionInfo()
+
+```
