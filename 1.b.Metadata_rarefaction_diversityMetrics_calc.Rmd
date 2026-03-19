@@ -160,24 +160,6 @@ sample_data(p.1)[['Omicron']] <- ifelse(is.na(sample_data(p.1)[['Symptomonset.da
 sample_data(p.1)[['Omicron']] = as.factor(sample_data(p.1)[['Omicron']])
 ```
 
-# Sample Stage categorization
-
-Acute - Acute within 40 days of symptoms
-
-Recovery - Recovery beyond 40 days to 3 months
-
-Convalescent - Convalescence beyond 3 months to 12 months
-
-Extended - Late convalescence > 12 mo to 24 months
-
-```{r edit stage categorization}
-sample_data(p.1)[['Stage']] = ifelse(is.na(sample_data(p.1)[['Stage']]),'Healthy Volunteers',
-                                     ifelse(sample_data(p.1)[['Stage']] == 'A', 'Acute',
-                                            ifelse(sample_data(p.1)[['Stage']] == 'R', 'Recovery',
-                                                   ifelse(sample_data(p.1)[['Stage']] == 'C', 'Convalescent',
-                                                          ifelse(sample_data(p.1)[['Stage']] == 'C24', 'Extended','NONE')))))
-```
-
 # Final metadata
 
 ```{r remove redundant columns}
